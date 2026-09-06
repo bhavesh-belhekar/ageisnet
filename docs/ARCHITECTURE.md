@@ -29,11 +29,21 @@ Each layer is a separate, independently runnable service (its own container in D
 ## 3. Component Breakdown
 
 ### 3.1 Capture Layer — `ebpf-agent`
-Runs privileged on the Docker host. Attaches eBPF programs via:
-- **TC hooks** — capture internal/east-west traffic (container-to-container, on veth interfaces).
-- **XDP hooks** — capture external/north-south traffic (container-to-internet, at the network card level for speed).
+Runs privileged on the Docker host. Attaches eBPF programs at the **socket layer**:
+- **`tracepoint/sock/inet_sock_set_state`** — captures TCP connection lifecycle transitions (ESTABLISHED → open, active-close states → close) with per-socket metadata (4-tuple, family, protocol, socket pointer).
+- **kprobes `tcp_sendmsg` / `tcp_cleanup_rbuf`** — accumulate per-socket bytes sent/received; sampled at close for the event's final byte counts.
+- Events are emitted through a ring buffer and surfaced by the loader over a pipe in a single line format (`EVTO|...` open, `EVTC|...` close).
 
-**Responsibility:** Produce `RawEvent` messages (connection metadata, byte counts, container attribution, `event_type` open/close per the frozen schema in `PRD.md` Section 9) onto the event pipeline. Nothing else — no detection logic lives here. Container attribution is implemented in the loader (Phase 2) by correlating the veth/interface index seen on a captured packet back to the container's network namespace — attribution is never read directly off the raw XDP packet.
+**Socket-owner attribution:** Container ID is derived from the socket's own network namespace, read CO-RE (`sk->__sk_common.skc_net.net->ns.inum`) per socket. This is attachment-point independent, so open/close events stay attributed even when a transition executes in another task's context (e.g., a server socket's close run from a peer's process). See loader below.
+
+**Hook-mechanism decision (2026-09-06):** The original plan was packet-layer hooks — **TC** for internal/east-west (veth interfaces) and **XDP** for external/north-south (network card, for speed). The socket-layer approach above is what was validated end-to-end through L1–L3 (device prototypes in `PHASES.doc.md` §5). It was chosen over building TC/XDP from scratch because: it fully meets **FR-1**'s kernel-level capture requirement (every connection's open/close, byte counts, attributable per container), it avoids redoing the validation layer, and — per PRD.md's explicit non-goal of production-grade throughput/scaling — socket-layer capture is appropriate for this project. Packet-layer TC/XDP remains a possible future upgrade path for line-rate scaling, not a current requirement.
+
+**Direction heuristic:** `direction` (internal vs external) is derived in the loader by an **IP-map heuristic** — the loader builds a `local IP → container_id` map per network namespace (from `/proc/<pid>/net/fib_trie`) and marks an event `internal` when the destination IP resolves to a *different* known container, `external` otherwise (e.g., public internet, or a service the netns does not declare locally). This is an explicit heuristic, not a packet-interface classification — acceptable because the socket-layer hooks do not see the egress interface. It is documented as a known approximation; the external `example.com` smoke runs affirm the external path.
+
+**Responsibility:** Produce `RawEvent` messages (connection metadata, byte counts, container attribution, `event_type` open/close per the frozen schema in `PRD.md` Section 9) onto the event pipeline. Nothing else — no detection logic lives here.
+
+**Future improvement (not built now):** Move the loader's netns/cgroup parsing and Redis publish fully into C (hiredis), removing the Python wrapper (option 1b). Kept as Python (`load_and_publish.py`) deliberately — lower risk, reuses the L2/L3-validated pipe contract, and fits the course-project scope and PRD.md Non-Goals. Revisit only if event-rate-driven.<br>
+> **Note:** This is the fixed §3.1 contract the capture implementation targets; the loader is started via `ENTRYPOINT python3 loader/load_and_publish.py`, which builds `src/capture` (clang + libbpf, CO-RE) at first start and spawns it as the capture subprocess.
 
 ### 3.2 Event Pipeline — `redis-streams`
 **Responsibility:** Durable buffer between the eBPF agent and the Detection Engine. Decouples producer speed (kernel events can spike) from consumer speed (ML inference takes longer than a raw event arrival), and allows event replay for retraining ML models later.
@@ -81,7 +91,7 @@ The core service, split internally into sub-modules that mirror the pipeline sta
 ## 4. Data Flow (Step-by-Step)
 
 1. A container does something on the network (e.g., opens a connection to a new IP, or to another container on a new port).
-2. **`ebpf-agent`** observes this at the kernel level (via TC hook if internal, XDP if external) and emits a `RawEvent` JSON message.
+2. **`ebpf-agent`** observes this at the kernel level (socket-layer tracepoints/kprobes) and emits a `RawEvent` JSON message.
 3. **Event pipeline** (Redis Streams) buffers the message on a stream/topic.
 4. **Detection Engine** consumes the message:
    a. `rule_engine` checks it against known-bad indicators — if matched, an alert is generated immediately with `detection_type=rule`.

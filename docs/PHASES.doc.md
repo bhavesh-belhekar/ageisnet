@@ -76,13 +76,12 @@ Think of it like constructing a building: you don't show tenants a "Phase 1 buil
 **Goal:** Real kernel-level events flow into Redis.
 
 **Tasks:**
-- [ ] Prototype a single eBPF program using BCC (fast iteration) to validate the approach on the dev machine.
-- [ ] Port the validated logic to `libbpf` + CO-RE for the actual build (per `RULES.md` Section 2.1 — BCC is prototype-only).
-- [ ] Implement the TC hook for internal (container-to-container) traffic capture.
-- [ ] Implement the XDP hook for external (container-to-internet) traffic capture.
-- [ ] Implement `loader/load_and_publish.py` — loads both programs, reads captured events, maps them to the frozen `Event` schema, publishes to Redis Streams.
-- [ ] Attribute each event to a container ID (via cgroup lookup).
-- [ ] Add retry/backoff for Redis publish failures per `RULES.md` Section 4.2.
+- [x] Prototype capture using a scriptable eBPF frontend (bpftrace; BCC-family tooling was the initial suggestion — bpftrace chosen for iteration speed) to validate the approach on the dev machine.
+- [x] Port the validated logic to `libbpf` + CO-RE for the actual build (per `RULES.md` Section 2.1) — **L3 parity smoke passed 2026-09-06**.
+- [x] Implement the capture hook for internal (container-to-container) and external (container-to-internet) traffic.
+- [x] Implement `loader/load_and_publish.py` — builds and spawns the CO-RE capture binary, reads captured events, maps them to the frozen `Event` schema, publishes to Redis Streams.
+- [x] Attribute each event to a container ID (socket-owner netns via CO-RE `skc_net` → cgroup lookup).
+- [x] Add retry/backoff for Redis publish failures per `RULES.md` Section 4.2 (exponential backoff, max ~5 retries, drop + `WARNING` with event summary).
 
 **Deliverable:** Running `docker-compose up`, generating traffic between two demo containers produces real events visible in the Redis stream (verify with `redis-cli XRANGE`).
 

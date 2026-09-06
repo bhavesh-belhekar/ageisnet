@@ -1,4 +1,0 @@
-#ifndef AEGISNET_COMMON_H
-#define AEGISNET_COMMON_H
-
-#endif

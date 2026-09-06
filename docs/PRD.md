@@ -60,7 +60,7 @@ Applications running in Docker containers are vulnerable to compromise (maliciou
 
 AegisNet is built as **one complete pipeline**, all components delivered together rather than staged:
 
-- **Capture:** Real eBPF-based event capture from day one — TC hooks for internal (east-west) container-to-container traffic, XDP for external (north-south) container-to-internet traffic.
+- **Capture:** Real eBPF-based event capture from day one — socket-layer tracepoints + kprobes observing connection open/close and per-socket byte counts, attributed per container (see `ARCHITECTURE.md` §3.1 for the hook-mechanism decision vs. the TC/XDP packet-layer plan).
 - **Pipeline:** Redis Streams buffering events between capture and the detection engine.
 - **Detection Engine:** Rule-based signature matching + ML-based anomaly detection (flow model for external traffic, graph model for the internal communication graph) running together on every event.
 - **Risk Scoring:** Combined rule + ML output into a single Low/Medium/High severity score.
@@ -80,7 +80,7 @@ AegisNet is built as **one complete pipeline**, all components delivered togethe
 ### FR-1: eBPF-Based Network Event Capture
 - FR-1.1: System shall capture container network events (connection open/close, bytes sent/received, port, protocol, destination) at the kernel level using eBPF.
 - FR-1.2: Capture shall be attributable to a specific container (via cgroup/container ID).
-- FR-1.3: Capture shall cover both internal (container-to-container, via TC hooks) and external (container-to-internet, via XDP) traffic simultaneously.
+- FR-1.3: Capture shall cover both internal (container-to-container) and external (container-to-internet) traffic simultaneously via kernel-level socket capture. (Original phrasing named TC hooks / XDP hooks for each direction; the hook mechanism was finalized as socket-layer tracepoints + kprobes — see `ARCHITECTURE.md` §3.1. Packet-layer TC/XDP remains a future upgrade path, not an FR requirement.)
 
 ### FR-2: Container Communication Graph (East-West)
 - FR-2.1: System shall build and continuously update a graph of container-to-container connections observed over a rolling learning window (default: 24 hours; config-driven).
@@ -152,7 +152,7 @@ AegisNet is built as **one complete pipeline**, all components delivered togethe
 
 See the accompanying `ARCHITECTURE.md` for the full end-to-end pipeline design and folder structure:
 
-Docker Host → eBPF (TC + XDP) → Event Pipeline (Redis Streams) → FastAPI Backend (Rule Engine + ML Engine + Risk Scoring + SHAP + MITRE Mapper) → Storage (PostgreSQL/TimescaleDB + Neo4j) → WebSocket → React Dashboard.
+Docker Host → eBPF (socket-layer tracepoints + kprobes, CO-RE) → Event Pipeline (Redis Streams) → FastAPI Backend (Rule Engine + ML Engine + Risk Scoring + SHAP + MITRE Mapper) → Storage (PostgreSQL/TimescaleDB + Neo4j) → WebSocket → React Dashboard.
 
 ---
 
@@ -212,7 +212,7 @@ indicator (ip/domain), type, source, added_date
 
 See `ARCHITECTURE.md` and the Project Proposal document (Section 6) for the full tech stack table with alternatives and justification. Summary:
 
-- **Capture:** eBPF (libbpf/CO-RE), TC hooks + XDP
+- **Capture:** eBPF (libbpf/CO-RE), socket-layer tracepoints + kprobes
 - **Pipeline:** Redis Streams
 - **Backend:** Python + FastAPI
 - **Storage:** PostgreSQL + TimescaleDB, Neo4j
@@ -266,7 +266,7 @@ Since this is delivered as one complete pipeline rather than staged releases, th
 
 1. Freeze the event/alert schema (Section 9) and API contract (Section 10) — this unblocks parallel work.
 2. Stand up infrastructure: Docker Compose skeleton, PostgreSQL/TimescaleDB, Neo4j, Redis.
-3. Build the eBPF capture agent (TC + XDP) publishing to the event pipeline.
+3. Build the eBPF capture agent (socket-layer tracepoints + kprobes, per `ARCHITECTURE.md` §3.1) publishing to the event pipeline.
 4. Build the FastAPI backend consumer: rule engine → ML engine → risk scoring → SHAP → MITRE mapping → storage.
 5. Build the React dashboard: alert feed, network graph, SHAP panel — wired to the REST API and WebSocket.
 6. Build the demo/test environment: multi-container victim app + scripted attack scenarios.

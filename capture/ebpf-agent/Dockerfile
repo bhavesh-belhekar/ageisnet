@@ -3,7 +3,6 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bpftool \
-        bpftrace \
         clang \
         libbpf-dev \
         llvm \
@@ -22,6 +21,5 @@ WORKDIR /agent
 
 COPY src ./src
 COPY loader ./loader
-COPY Makefile .
 
 ENTRYPOINT ["python3", "loader/load_and_publish.py"]

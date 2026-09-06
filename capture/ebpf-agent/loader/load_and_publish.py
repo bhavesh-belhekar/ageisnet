@@ -1,17 +1,28 @@
-"""Load eBPF programs and publish captured raw events to Redis Streams.
+"""Build, spawn and feed the CO-RE capture binary; publish events to Redis.
 
-Attribution: netns inode to container mapping is rebuilt from cgroup scope
-paths and host /proc (agent runs with pid: host). Only events whose netns
-belongs to a known container are published, in the frozen Event schema
-(PRD.md Section 9).
+The loader:
+  1. Builds src/capture once at startup (make -C src capture, generating
+     vmlinux.h from the host BTF) — if the build fails it logs an
+     actionable error and exits non-zero (RULES.md Section 4.2: never run
+     half-working).
+  2. Spawns src/capture and parses its EVTO|/EVTC| pipe lines.
+  3. Maps socket-owner netns inode -> container ID (cgroup scope + host
+     /proc, agent runs with pid: host) and derives direction via the
+     documented IP-map heuristic (ARCHITECTURE.md Section 3.1).
+  4. Publishes matching events to Redis Streams with exponential backoff
+     retries (max ~5), dropping only after retries are exhausted and
+     logging a WARNING with the event's summary.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
+import sys
+import threading
 import time
 from datetime import UTC, datetime
 from glob import glob
@@ -19,11 +30,14 @@ from glob import glob
 import redis
 
 AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AGENT_BT = os.path.join(AGENT_DIR, "src", "agent.bt")
+AGENT_SRC = os.path.join(AGENT_DIR, "src")
+AGENT_BIN = os.path.join(AGENT_SRC, "capture")
 EVENTS_STREAM = "events:raw"
 NETNS_RE = re.compile(r"^net:\[(\d+)\]$")
 NETNS_REFRESH_SECONDS = 10
-BPTRACE_RESTART_DELAY_SECONDS = 2
+MAX_PUBLISH_ATTEMPTS = 6
+
+logger = logging.getLogger("ebpf-agent")
 
 
 def _netns_inode(pid: str) -> int | None:
@@ -105,9 +119,35 @@ def read_stream(handle) -> str:
     return ""
 
 
-def publish(client: redis.Redis, event: dict) -> None:
+def event_summary(event: dict) -> str:
+    return (
+        f"{event['event_type']} {event['container_id']} "
+        f"{event['src_ip']}:{event['src_port']}->{event['dst_ip']}:{event['dst_port']} "
+        f"({event['direction']}, sent/recv {event['bytes_sent']}/{event['bytes_received']})"
+    )
+
+
+def publish(client: redis.Redis, event: dict) -> bool:
     payload = json.dumps(event)
-    client.xadd(EVENTS_STREAM, {"event": payload})
+    delay = 1.0
+    for attempt in range(MAX_PUBLISH_ATTEMPTS):
+        try:
+            client.xadd(EVENTS_STREAM, {"event": payload})
+            return True
+        except redis.RedisError as exc:
+            remaining = MAX_PUBLISH_ATTEMPTS - 1 - attempt
+            if remaining == 0:
+                logger.warning(
+                    "dropping event after %d retries (%s): %s",
+                    MAX_PUBLISH_ATTEMPTS - 1,
+                    exc,
+                    event_summary(event),
+                )
+                return False
+            logger.warning("redis publish failed (%s); %d retries left", exc, remaining)
+            time.sleep(delay)
+            delay *= 2
+    return False
 
 
 class Loader:
@@ -120,9 +160,17 @@ class Loader:
         )
         self.netns_map: dict[int, str] = {}
         self.ip_map: dict[str, str] = {}
+        self._stop = threading.Event()
 
     def refresh_netns_map(self) -> None:
         self.netns_map, self.ip_map = build_container_info()
+
+    def _refresh_loop(self) -> None:
+        while not self._stop.wait(NETNS_REFRESH_SECONDS):
+            try:
+                self.refresh_netns_map()
+            except OSError as exc:
+                logger.warning("netns map refresh failed: %s", exc)
 
     def container_id(self, netns: int) -> str | None:
         return self.netns_map.get(netns)
@@ -152,9 +200,26 @@ class Loader:
             "direction": direction,
         }
 
-    def run_btrace(self) -> None:
+    def ensure_capture(self) -> bool:
+        result = subprocess.run(
+            ["make", "-C", AGENT_SRC, "capture"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if result.returncode != 0:
+            tail = result.stdout[-2000:].strip() or "(no build output)"
+            logger.error("CO-RE capture build failed (rc=%d):\n%s", result.returncode, tail)
+            logger.error(
+                "requires clang, llvm, libbpf-dev, bpftool and a host BTF "
+                "at /sys/kernel/btf/vmlinux mounted into the container"
+            )
+            return False
+        return True
+
+    def run_capture(self, binary: str) -> None:
         process = subprocess.Popen(
-            ["stdbuf", "-oL", "bpftrace", AGENT_BT],
+            ["stdbuf", "-oL", binary],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -167,9 +232,15 @@ class Loader:
             if not line:
                 if process.poll() is not None:
                     error = "".join(process.stderr.readlines()).strip()
-                    print(f"bpftrace exited rc={process.returncode}: {error}", flush=True)
-                    time.sleep(BPTRACE_RESTART_DELAY_SECONDS)
-                    return
+                    logger.warning("capture stderr:\n%s", error)
+                    if process.returncode == 0:
+                        logger.info("capture exited cleanly (rc=0)")
+                        sys.exit(0)
+                    logger.error(
+                        "capture exited rc=%d; refusing to run half-working",
+                        process.returncode,
+                    )
+                    sys.exit(process.returncode)
                 continue
             if not line.startswith("EVTO|") and not line.startswith("EVTC|"):
                 continue
@@ -184,22 +255,39 @@ class Loader:
                 )
             except ValueError:
                 continue
+            except redis.RedisError as exc:
+                logger.warning(
+                    "redis unavailable while building event (%s); "
+                    "backing off, dropping this raw event: %s",
+                    exc,
+                    "|".join(fields),
+                )
+                time.sleep(1)
+                continue
             if event is None:
                 continue
             if event["container_id"] not in printed_containers:
                 printed_containers.add(event["container_id"])
-                print(
-                    f"capture active in netns of {event['container_id']} " f"({event['src_ip']})",
-                    flush=True,
+                logger.info(
+                    "capture active in netns of %s (%s)",
+                    event["container_id"],
+                    event["src_ip"],
                 )
             publish(self.redis_client, event)
 
     def run(self) -> None:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s",
+        )
+        logger.info("building CO-RE capture (%s)", AGENT_BIN)
+        if not self.ensure_capture():
+            logger.error("capture build failed; exposing error and exiting non-zero")
+            sys.exit(1)
         self.refresh_netns_map()
-        print(f"netns map: {len(self.netns_map)} containers found", flush=True)
-        while True:
-            self.refresh_netns_map()
-            self.run_btrace()
+        logger.info("netns map: %d containers found", len(self.netns_map))
+        threading.Thread(target=self._refresh_loop, daemon=True).start()
+        self.run_capture(AGENT_BIN)
 
 
 def main() -> None:

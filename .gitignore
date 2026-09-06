@@ -27,3 +27,10 @@ dist-frontend/
 
 # Logs
 *.log
+
+# eBPF build artifacts (generated in-container from host BTF)
+capture/ebpf-agent/src/vmlinux.h
+capture/ebpf-agent/src/*.bpf.o
+capture/ebpf-agent/src/*.skel.h
+capture/ebpf-agent/src/capture
+capture/ebpf-agent/src/smoke
