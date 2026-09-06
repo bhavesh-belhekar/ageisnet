@@ -1,4 +1,11 @@
-"""Shared Pydantic request/response schemas for the API layer.
+"""Shared Pydantic request/response schemas for the API layer."""
 
-Phase 1 placeholder; concrete schemas land with their endpoints in later phases.
-"""
+from __future__ import annotations
+
+from pydantic import BaseModel
+
+
+class AckRequest(BaseModel):
+    """Request body for PATCH /api/alerts/{id}/ack."""
+
+    acknowledged: bool = True

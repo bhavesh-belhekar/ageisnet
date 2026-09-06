@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS raw_alerts (
     severity            VARCHAR(8)   NOT NULL,
     mitre_technique_id  VARCHAR(16),
     description         TEXT         NOT NULL,
+    shap_explanation    JSONB,
     acknowledged        BOOLEAN      NOT NULL DEFAULT FALSE
 );
 
@@ -53,6 +54,11 @@ CREATE INDEX IF NOT EXISTS idx_raw_alerts_event    ON raw_alerts (event_id);
 CREATE INDEX IF NOT EXISTS idx_raw_alerts_container ON raw_alerts (container_id);
 CREATE INDEX IF NOT EXISTS idx_raw_alerts_severity ON raw_alerts (severity);
 CREATE INDEX IF NOT EXISTS idx_raw_alerts_mitre    ON raw_alerts (mitre_technique_id);
+CREATE INDEX IF NOT EXISTS idx_raw_alerts_ts       ON raw_alerts (timestamp);
+"""
+
+MIGRATIONS = """
+ALTER TABLE raw_alerts ADD COLUMN IF NOT EXISTS shap_explanation JSONB;
 """
 
 INSERT_SQL = """
@@ -90,10 +96,11 @@ async def create_pool() -> asyncpg.Pool:
 
 
 async def ensure_schema(pool: asyncpg.Pool) -> None:
-    """Create the raw_events and raw_alerts tables and indexes if missing."""
+    """Create the raw_events and raw_alerts tables, indexes, and apply migrations."""
     async with pool.acquire() as conn:
         await conn.execute(SCHEMA_SQL)
         await conn.execute(ALERT_SCHEMA_SQL)
+        await conn.execute(MIGRATIONS)
     logger.info("raw_events + raw_alerts schema ensured")
 
 
@@ -132,3 +139,131 @@ async def save_event(pool: asyncpg.Pool, event: dict) -> None:
             event["bytes_received"],
             event["direction"],
         )
+
+
+class DatabaseUnavailableError(RuntimeError):
+    """Raised when the Postgres pool is unavailable / not initialized."""
+
+
+def _event_row(record: asyncpg.Record) -> dict:
+    """Map a raw_events row to the frozen Event schema (event_timestamp→timestamp)."""
+    row = dict(record)
+    row["timestamp"] = row.pop("event_timestamp")
+    return row
+
+
+def _build_where(
+    columns: dict[str, str],
+    values: dict[str, object],
+) -> tuple[str, list[object]]:
+    """Build a parameterized WHERE clause for whitelisted column:value pairs."""
+    clauses = []
+    params: list[object] = []
+    for field, column in columns.items():
+        value = values.get(field)
+        if value is None:
+            continue
+        params.append(value)
+        clauses.append(f"{column} = ${len(params)}")
+    return ("WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+
+def _append_range(
+    where_sql: str, params: list[object], column: str, op: str, value: object
+) -> tuple[str, int]:
+    """Append a ``column op $N`` clause and its value; returns (where, param_count)."""
+    param_count = len(params) + 1
+    clause = f"{column} {op} ${param_count}"
+    params.append(value)
+    where_sql = f"{where_sql} AND {clause}" if where_sql else f"WHERE {clause}"
+    return where_sql, param_count
+
+
+async def list_events(
+    pool: asyncpg.Pool,
+    *,
+    container_id: str | None = None,
+    direction: str | None = None,
+    event_type: str | None = None,
+    since: object | None = None,
+    until: object | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict]:
+    """Return raw events, newest first, filtered by the given criteria."""
+    filtered = dict(container_id=container_id, direction=direction, event_type=event_type)
+    where_sql, params = _build_where(
+        {
+            "container_id": "container_id",
+            "direction": "direction",
+            "event_type": "event_type",
+        },
+        filtered,
+    )
+    if since is not None:
+        where_sql, param_count = _append_range(where_sql, params, "event_timestamp", ">=", since)
+    else:
+        param_count = len(params)
+    if until is not None:
+        where_sql, param_count = _append_range(where_sql, params, "event_timestamp", "<=", until)
+    params.extend([limit, offset])
+    sql = f"""
+        SELECT * FROM raw_events
+        {where_sql}
+        ORDER BY event_id DESC
+        LIMIT ${param_count + 1} OFFSET ${param_count + 2}
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+    return [_event_row(r) for r in rows]
+
+
+async def list_alerts(
+    pool: asyncpg.Pool,
+    *,
+    severity: str | None = None,
+    container_id: str | None = None,
+    since: object | None = None,
+    until: object | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict]:
+    """Return alerts, newest first, filtered by the given criteria."""
+    where_sql, params = _build_where(
+        {"severity": "severity", "container_id": "container_id"},
+        {"severity": severity, "container_id": container_id},
+    )
+    if since is not None:
+        where_sql, param_count = _append_range(where_sql, params, "timestamp", ">=", since)
+    else:
+        param_count = len(params)
+    if until is not None:
+        where_sql, param_count = _append_range(where_sql, params, "timestamp", "<=", until)
+    params.extend([limit, offset])
+    sql = f"""
+        SELECT * FROM raw_alerts
+        {where_sql}
+        ORDER BY alert_id DESC
+        LIMIT ${param_count + 1} OFFSET ${param_count + 2}
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+    return [dict(r) for r in rows]
+
+
+async def get_alert(pool: asyncpg.Pool, alert_id: int) -> dict | None:
+    """Return one alert by id, or None."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM raw_alerts WHERE alert_id = $1", alert_id)
+    return dict(row) if row else None
+
+
+async def ack_alert(pool: asyncpg.Pool, alert_id: int, acknowledged: bool) -> dict | None:
+    """Set the acknowledged flag on an alert; return the updated row or None."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE raw_alerts SET acknowledged = $2 WHERE alert_id = $1 RETURNING *",
+            alert_id,
+            acknowledged,
+        )
+    return dict(row) if row else None

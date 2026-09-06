@@ -24,7 +24,9 @@ import redis.asyncio as aioredis
 
 from app.db.postgres import save_alert, save_event
 from app.models.event import Event
+from app.risk_scoring.scorer import RiskScorer
 from app.rule_engine.engine import RuleEngine
+from app.ws.alerts_ws import AlertHub
 
 logger = logging.getLogger("event_consumer")
 
@@ -37,6 +39,7 @@ BATCH_SIZE = 10
 MAX_DELIVERIES = 5
 
 _engine: RuleEngine | None = None
+_scorer: RiskScorer | None = None
 
 
 def _get_engine() -> RuleEngine:
@@ -44,6 +47,13 @@ def _get_engine() -> RuleEngine:
     if _engine is None:
         _engine = RuleEngine()
     return _engine
+
+
+def _get_scorer() -> RiskScorer:
+    global _scorer
+    if _scorer is None:
+        _scorer = RiskScorer()
+    return _scorer
 
 
 async def _ensure_group(redis: aioredis.Redis) -> None:
@@ -101,8 +111,23 @@ async def _sweep_dead_letters(redis: aioredis.Redis) -> None:
         )
 
 
-async def _run_rules(redis: aioredis.Redis, pool: asyncpg.Pool, event: Event) -> None:
-    """Evaluate the event against the rule engine; persist any alerts."""
+async def _run_rules(
+    redis: aioredis.Redis,
+    pool: asyncpg.Pool,
+    event: Event,
+    hub: AlertHub | None = None,
+) -> None:
+    """Evaluate the event against the rule engine; persist any alerts.
+
+    Persist+push pipeline per event (FR-6 / FR-7.1 / FR-7.2):
+    1. rule engine produces the signal alerts for this event
+    2. risk scoring combines them into a single severity label per event,
+       which overrides each alert's own severity
+    3. every alert is persisted (rule hit -> audit record, regardless of
+       severity)
+    4. each persisted alert is fanned out to WebSocket subscribers (only
+       Medium+ actually leave the hub, FR-7.2)
+    """
     try:
         alerts = _get_engine().evaluate(event)
     except Exception:
@@ -110,16 +135,29 @@ async def _run_rules(redis: aioredis.Redis, pool: asyncpg.Pool, event: Event) ->
             "rule engine failed for event_id=%s\n%s", event.event_id, traceback.format_exc()
         )
         return  # event already persisted — rule failure is non-fatal
+
+    if not alerts:
+        return
+
+    combined = _get_scorer().score(
+        [{"kind": "rule", "severity": alert.severity.value} for alert in alerts]
+    )
     for alert in alerts:
         try:
+            alert.severity = combined
             alert_id = await save_alert(pool, alert.model_dump())
             logger.info(
-                "alert %s persisted: event_id=%s mitre=%s container=%s",
+                "alert %s persisted: event_id=%s mitre=%s container=%s severity=%s",
                 alert_id,
                 event.event_id,
                 alert.mitre_technique_id,
                 alert.container_id,
+                combined.value,
             )
+            if hub is not None:
+                payload = alert.model_dump(mode="json")
+                payload["alert_id"] = alert_id
+                await hub.publish(payload)
         except Exception:
             logger.error(
                 "alert persist failed for event_id=%s\n%s", event.event_id, traceback.format_exc()
@@ -131,6 +169,7 @@ async def _process_one(
     pool: asyncpg.Pool,
     raw_id: bytes,
     fields: dict[bytes, bytes],
+    hub: AlertHub | None = None,
 ) -> None:
     """Validate, persist, evaluate rules, and ACK a single stream message."""
     try:
@@ -156,12 +195,16 @@ async def _process_one(
         )
         return  # don't ACK — redeliver on next consumer start
 
-    await _run_rules(redis, pool, event)
+    await _run_rules(redis, pool, event, hub)
 
     await redis.xack(STREAM, GROUP, raw_id)
 
 
-async def consumer_loop(redis: aioredis.Redis, pool: asyncpg.Pool) -> None:
+async def consumer_loop(
+    redis: aioredis.Redis,
+    pool: asyncpg.Pool,
+    hub: AlertHub | None = None,
+) -> None:
     """Main consumer loop.  Runs until cancelled."""
     await _ensure_group(redis)
     logger.info("consumer loop started — reading from %s", STREAM)
@@ -179,7 +222,7 @@ async def consumer_loop(redis: aioredis.Redis, pool: asyncpg.Pool) -> None:
             break
         stream_messages = results[0][1]
         for raw_id, fields in stream_messages:
-            await _process_one(redis, pool, raw_id, fields)
+            await _process_one(redis, pool, raw_id, fields, hub)
         pending = bool(stream_messages)
 
     # --- Phase 1b: sweep dead letters (after first drain) ---
@@ -200,5 +243,5 @@ async def consumer_loop(redis: aioredis.Redis, pool: asyncpg.Pool) -> None:
             continue
         stream_messages = results[0][1]
         for raw_id, fields in stream_messages:
-            await _process_one(redis, pool, raw_id, fields)
+            await _process_one(redis, pool, raw_id, fields, hub)
         await _sweep_dead_letters(redis)

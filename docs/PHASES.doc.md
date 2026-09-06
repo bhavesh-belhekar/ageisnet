@@ -108,14 +108,14 @@ and the frozen schema are unchanged (see `PRD.md` Section 9).
 **Goal:** Events consumed from Redis are checked against rules and produce alerts.
 
 **Tasks:**
-- [ ] Implement `backend/app/consumers/event_consumer.py` — reads from Redis Streams.
-- [ ] Implement `rule_engine/indicators.py` — loads known-bad IP/domain list, known-bad ports, restricted-port config.
-- [ ] Implement `rule_engine/engine.py` — evaluates all rule categories per event.
-- [ ] Implement `risk_scoring/scorer.py` — combines rule hits into a severity (ML integration comes in Phase 4).
-- [ ] Implement `models/event.py`, `models/alert.py`, and DB writes to Postgres.
-- [ ] Implement `api/alerts.py` and `api/events.py` GET endpoints.
-- [ ] Implement `ws/alerts_ws.py` WebSocket push on new alert.
-- [ ] Write unit tests for each rule category per `RULES.md` Section 8 checklist.
+- [x] Implement `backend/app/consumers/event_consumer.py` — reads from Redis Streams.
+- [x] Implement `rule_engine/indicators.py` — loads known-bad IP/domain list, known-bad ports, restricted-port config.
+- [x] Implement `rule_engine/engine.py` — evaluates all rule categories per event.
+- [x] Implement `risk_scoring/scorer.py` — combines rule hits into a severity (ML integration comes in Phase 4).
+- [x] Implement `models/event.py`, `models/alert.py`, and DB writes to Postgres.
+- [x] Implement `api/alerts.py` and `api/events.py` GET endpoints.
+- [x] Implement `ws/alerts_ws.py` WebSocket push on new alert.
+- [x] Write unit tests for each rule category per `RULES.md` Section 8 checklist.
 
 **Deliverable:** A known-bad-IP connection (real or mocked event) produces a stored alert retrievable via `/api/alerts` and pushed via WebSocket.
 
