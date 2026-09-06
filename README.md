@@ -23,9 +23,11 @@ cp .env.example .env
 docker compose up --build
 ```
 
-This brings up all 9 services (`ebpf-agent`, `redis`, `postgres`, `neo4j`, `backend`,
-`frontend`, `demo-web`, `demo-api`, `demo-db`). `docker-compose.override.yml` is merged
-automatically and exposes the ports below (loopback-only) plus hot-reload mounts.
+This brings up all 10 services (`ebpf-agent`, `redis`, `postgres`, `neo4j`, `neo4j-init`,
+`backend`, `frontend`, `demo-web`, `demo-api`, `demo-db`). `neo4j-init` is a one-shot helper
+that applies the graph constraints after `neo4j` is healthy and then exits;
+`docker-compose.override.yml` is merged automatically and exposes the ports below
+(loopback-only) plus hot-reload mounts.
 
 | What | Where |
 |---|---|
@@ -71,6 +73,14 @@ Run the test suite (from the repo root):
 ```bash
 pytest
 ```
+
+> **Data-model note (`infra/postgres/init.sql`):** `events` and `alerts` are
+> TimescaleDB hypertables, which only allow UNIQUE/PK indexes on the partitioning
+> column (`timestamp`). Traditional PK/FK constraints would break the hypertable, so
+> there are **no PKs/FKs** on those tables — instead, unique indexes on
+> `(event_id, timestamp)` and `(alert_id, timestamp)` enforce identity, and
+> referential integrity is enforced in the application layer (backend writes), not
+> by the database. Don't "help" by adding FK constraints back.
 
 Run lint/format gates (CI equivalent):
 
