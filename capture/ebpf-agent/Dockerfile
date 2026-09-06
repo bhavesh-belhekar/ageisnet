@@ -9,9 +9,13 @@ RUN apt-get update \
         make \
         python3 \
         python3-pip \
+        python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir redis==5.2.1
+RUN python3 -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir redis==5.2.1
+
+ENV PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /agent
 

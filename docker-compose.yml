@@ -22,11 +22,17 @@ services:
 
   redis:
     image: redis:7.4-alpine
-    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    command:
+      - redis-server
+      - /usr/local/etc/redis/redis.conf
+      - --requirepass
+      - ${REDIS_PASSWORD:-aegisnet}
     volumes:
       - ./infra/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test:
+        - CMD-SHELL
+        - redis-cli --no-auth-warning -a ${REDIS_PASSWORD:-aegisnet} ping
       interval: 5s
       timeout: 3s
       retries: 10
@@ -51,12 +57,11 @@ services:
     restart: unless-stopped
 
   neo4j:
-    image: neo4j:5.26-community
+    build: ./infra/neo4j
     environment:
       NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-aegisnet}
     volumes:
       - neo4j_data:/data
-      - ./infra/neo4j/init.cypher:/var/lib/neo4j/import/init.cypher:ro
     healthcheck:
       test:
         - CMD-SHELL
@@ -67,6 +72,30 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  neo4j-init:
+    build: ./infra/neo4j
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    environment:
+      NEO4J_HOST: neo4j
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-aegisnet}
+    command:
+      - /bin/bash
+      - -c
+      - |
+        for i in $$(seq 1 60); do
+          if cypher-shell -u "$$NEO4J_USER" -p "$$NEO4J_PASSWORD" -a "bolt://$$NEO4J_HOST:7687" --file /var/lib/neo4j/import/init.cypher; then
+            echo "neo4j init OK"
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "neo4j init FAILED"
+        exit 1
+    restart: "no"
+
   backend:
     build: ./backend
     env_file:
@@ -75,6 +104,7 @@ services:
     environment:
       POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
       REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-aegisnet}
       NEO4J_HOST: ${NEO4J_HOST:-neo4j}
     depends_on:
       postgres:

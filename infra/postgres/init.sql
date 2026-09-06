@@ -1,7 +1,7 @@
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 CREATE TABLE IF NOT EXISTS events (
-    event_id        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    event_id        BIGINT GENERATED ALWAYS AS IDENTITY,
     container_id    TEXT NOT NULL,
     timestamp       TIMESTAMPTZ NOT NULL,
     src_ip          INET NOT NULL,
@@ -15,8 +15,8 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE TABLE IF NOT EXISTS alerts (
-    alert_id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    event_id           BIGINT REFERENCES events (event_id),
+    alert_id           BIGINT GENERATED ALWAYS AS IDENTITY,
+    event_id           BIGINT,
     container_id       TEXT NOT NULL,
     timestamp          TIMESTAMPTZ NOT NULL,
     detection_type     TEXT NOT NULL CHECK (detection_type IN ('rule', 'ml')),
@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS alerts (
 
 SELECT create_hypertable('events', 'timestamp', if_not_exists => TRUE);
 SELECT create_hypertable('alerts', 'timestamp', if_not_exists => TRUE);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_id ON events (event_id, timestamp);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_id ON alerts (alert_id, timestamp);
 
 CREATE INDEX IF NOT EXISTS idx_events_container_time
     ON events (container_id, timestamp DESC);

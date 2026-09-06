@@ -243,6 +243,7 @@ aegisnet/
 | `backend` | `backend/` | FastAPI detection engine + API + WebSocket |
 | `postgres` | `infra/postgres/` | Event/alert storage |
 | `neo4j` | `infra/neo4j/` | Container communication graph |
+| `neo4j-init` | `infra/neo4j/` | One-shot helper that applies `init.cypher` (constraints) after `neo4j` is healthy, then exits — the Neo4j image does not auto-execute `.cypher` scripts on startup |
 | `frontend` | `frontend/` | React dashboard |
 | `demo-web`, `demo-api`, `demo-db` | `demo-app/` | The "victim" multi-container app used to generate realistic normal + attack traffic for the demo |
 
