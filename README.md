@@ -1,11 +1,12 @@
 # AegisNet
 
 AI-powered eBPF intrusion detection system for containerized & network environments.
-Hybrid HIDS + NIDS that captures container network traffic at the kernel level with eBPF,
-scores it with rule-based + ML anomaly detection, explains ML alerts with SHAP, and tags
-everything with MITRE ATT&CK — all surfaced in a real-time React dashboard.
+A hybrid HIDS + NIDS that captures container network traffic at the kernel level with
+eBPF and detects malicious activity. The final design (see `docs/PRD.md`) also adds ML
+anomaly detection with SHAP explanations and a real-time dashboard — those are **not yet
+built**; see Status below for what exists today.
 
-See `docs/PRD.md`, `docs/ARCHITECTURE.md`, `docs/RULES.md`, and `docs/PHASES.doc.md`.
+See `docs/PRD.md`, `docs/ARCHITECTURE.md`, `docs/RULES.md`, `docs/PHASES.doc.md`.
 
 ## Prerequisites
 
@@ -32,7 +33,7 @@ that applies the graph constraints after `neo4j` is healthy and then exits;
 | What | Where |
 |---|---|
 | Backend API | `http://localhost:8000` — see `/api/health` |
-| Frontend dashboard | `http://localhost:5173` |
+| Frontend dashboard | `http://localhost:5173` *(scaffold only; UI lands in Phase 6)* |
 | Postgres (override) | `localhost:5432` |
 | Redis (override) | `localhost:6379` |
 | Neo4j (override) | `http://localhost:7474` (bolt `localhost:7687`) |
@@ -115,5 +116,108 @@ Gates: `npm run typecheck`, `npm run lint`, `npm run format:check`.
 
 ## Status
 
-Phase 1 — Infrastructure Skeleton. All services run as stubs; detection, ML, eBPF
-capture, and dashboard logic land in later phases (see `docs/PHASES.doc.md`).
+**Through Phase 3 — Rule-Based Detection.** Phases 0 (contracts/scaffold), 1 (infra skeleton),
+2 (eBPF socket-layer capture → Redis → Postgres), and 3 (rule engine + API + WS delivery)
+are complete. Phase 4 (ML anomaly detection) onward is not yet started.
+
+| Phase | What |
+|---|---|
+| 0 | Frozen event/alert schemas (`PRD.md` §9), repo scaffold, `docker-compose` |
+| 1 | Infrastructure skeleton (all services up, no detection logic) |
+| 2 | eBPF capture layer (kernel socket tracepoints + kprobes → Redis Streams) |
+| 3 | Rule engine (T1043, T1046, T1071, T1571), risk scoring, REST API, WebSocket push |
+| 4–8 | ML, SHAP explainability, MITRE mapper, dashboard, demo scripts, tuning |
+
+---
+
+## Verifying the System
+
+### Health check
+
+```bash
+curl http://localhost:8000/api/health
+# → {"status":"ok","checks":{"postgres":true,"redis":true,"neo4j":true}}
+```
+
+### Browse alerts
+
+```bash
+curl http://localhost:8000/api/alerts          # all alerts, newest first
+curl "http://localhost:8000/api/alerts?severity=high"
+curl "http://localhost:8000/api/alerts?container_id=5bf7a9363c99"
+```
+
+### Trigger a demo detection
+
+Attack-scenario scripts exist as placeholders in `scripts/attack_scenarios/` (Phase 7);
+the four rule types below can be reproduced manually with `docker compose` running.
+
+**Prerequisites:** The backend's `data/threat_intel/known_bad_indicators.csv` ships two
+TEST-NET IPs (unroutable). For RULE-001 live tests only, add a real reachable IP to the
+CSV and restart the backend — remove it afterward (no rebuild required; the volume is
+host-mounted, see `docker-compose.yml` backend service).
+
+**Setup (demo containers already have basic networking tools):**
+
+```bash
+# Terminal 1 — start the known-bad port listener (RULE-002 / T1043)
+docker exec -d aegisnet-demo-db-1 nc -l -p 445
+```
+
+```bash
+# Terminal 2 — run the attack from demo-web
+# 1) T1043: connect to known-bad port 445
+# 2) T1046: scan 6 distinct service ports (threshold=5, 30s window)
+# 3) T1571: connect to demo-db:5432 (not in demo-web's allowed_sources)
+# 4) T1071: connect to known-bad IP (after adding it to the CSV)
+docker exec aegisnet-demo-web-1 sh -c '
+nc -z -w2 172.18.0.4 445
+for dst in 172.18.0.3:7687 172.18.0.3:7474 172.18.0.5:6379 172.18.0.4:5432 172.18.0.8:80 172.18.0.9:8000; do
+  ip=${dst%%:*}; port=${dst##*:}
+  nc -z -w2 "$ip" "$port" 2>/dev/null || true
+done
+nc -z -w2 <KNOWN_BAD_IP> 8000
+'
+```
+
+```bash
+# Check results
+curl http://localhost:8000/api/alerts | python3 -m json.tool
+```
+
+Expected output (example; alert IDs will differ):
+
+| alert_id | mitre | severity | container | description |
+|---|---|---|---|---|
+| 1 | T1043 | medium | demo-web | Connection to known-bad port 445 |
+| 2 | T1046 | high | demo-web | 5 distinct destination ports in 30s window |
+| 3 | T1571 | high | demo-web | Lateral movement to demo-db:5432 |
+| 4 | T1071 | high | demo-web | Known-bad IP in connection (dst) |
+| 5 | T1071 | high | demo-api | Known-bad IP in connection (src, mirror) |
+
+---
+
+## How Alert Counts Work — Read Before Interpreting Data
+
+### 4 events per connection
+
+Each internal TCP connection produces **4 capture events** (open + close on both
+endpoints), so a single connection can generate multiple alerts — one per rule that
+fires, plus a mirror alert on the peer container when RULE-001's known-bad IP is one
+endpoint. This is by design: the eBPF agent attributes each socket state transition to
+its owning container.
+
+### 15-second dedup window
+
+To suppress the open/close duplication, the rule engine suppresses a second alert for
+the same `(container, rule, destination)` within **15 seconds** (`ALERT_SUPPRESSION_SECONDS`
+in `backend/app/rule_engine/engine.py`). One connection therefore produces at most
+**one alert per rule per container**. This is a time-based simplification (not
+4-tuple correlation) — see `docs/ARCHITECTURE.md` §3.3 for the tradeoff.
+
+### Severity aggregation (FR-6)
+
+When one event fires multiple rules, a config-driven `RiskScorer` (`backend/app/risk_scoring/scorer.py`)
+combines them into a **single severity label per event**, which is assigned to every
+alert generated by that event. A lone high-severity rule hit always stays high
+(`hard_height_override` in `config/risk_policy.yaml`).
