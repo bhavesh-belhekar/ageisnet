@@ -1,0 +1,133 @@
+name: aegisnet
+
+volumes:
+  postgres_data:
+  neo4j_data:
+  demo_db_data:
+
+services:
+  ebpf-agent:
+    build: ./capture/ebpf-agent
+    privileged: true
+    cap_add:
+      - CAP_BPF
+      - CAP_NET_ADMIN
+      - CAP_SYS_ADMIN
+    volumes:
+      - /sys/kernel/btf:/sys/kernel/btf:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./infra/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aegisnet}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aegisnet}
+      POSTGRES_DB: ${POSTGRES_DB:-aegisnet}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-aegisnet} -d ${POSTGRES_DB:-aegisnet}
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  neo4j:
+    image: neo4j:5.26-community
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-aegisnet}
+    volumes:
+      - neo4j_data:/data
+      - ./infra/neo4j/init.cypher:/var/lib/neo4j/import/init.cypher:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - cypher-shell -u ${NEO4J_USER:-neo4j} -p ${NEO4J_PASSWORD:-aegisnet} "RETURN 1;" >/dev/null 2>&1
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      NEO4J_HOST: ${NEO4J_HOST:-neo4j}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request as u; u.urlopen('http://localhost:8000/api/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  demo-web:
+    build: ./demo-app/web
+    depends_on:
+      demo-api:
+        condition: service_started
+    restart: unless-stopped
+
+  demo-api:
+    build: ./demo-app/api
+    depends_on:
+      demo-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  demo-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DEMO_DB_USER:-demodb}
+      POSTGRES_PASSWORD: ${DEMO_DB_PASSWORD:-demodb}
+      POSTGRES_DB: ${DEMO_DB_NAME:-demodb}
+    volumes:
+      - demo_db_data:/var/lib/postgresql/data
+      - ./demo-app/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${DEMO_DB_USER:-demodb} -d ${DEMO_DB_NAME:-demodb}
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped

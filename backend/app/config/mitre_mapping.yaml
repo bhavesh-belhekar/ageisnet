@@ -1,0 +1,16 @@
+version: 0.1
+
+detection_type_to_technique:
+  rule:
+    known_bad_ip_connection: T1071
+    known_bad_port: T1043
+    port_scan: T1046
+    restricted_protocol: T1571
+  ml:
+    flow_beaconing: T1071.001
+    flow_exfiltration_spike: T1041
+    graph_lateral_movement: T1021.001
+    graph_unseen_edge: T1021
+  fallback:
+    ml_flow_anomaly: T1071
+    ml_graph_anomaly: T1021

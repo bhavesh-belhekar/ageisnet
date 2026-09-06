@@ -1,0 +1,24 @@
+version: 0.1
+
+risk_scoring:
+  component_weights:
+    rule_hit: 1
+    ml_flow_anomaly: 1
+    ml_graph_anomaly: 1
+  severity_tiers:
+    low_min: 0
+    medium_min: 2
+    high_min: 4
+  hard_height_override: true
+
+windows:
+  flow_model_feature_minutes: 5
+  graph_baseline_hours: 24
+  port_scan_window_seconds: 30
+
+ml_thresholds:
+  flow_model_anomaly_threshold: 0.6
+  graph_new_edge_threshold: 1.0
+
+false_positives:
+  fp_target_on_clean_baseline: 0.10

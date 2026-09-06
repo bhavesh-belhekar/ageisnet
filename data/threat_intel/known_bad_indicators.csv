@@ -1,0 +1,4 @@
+indicator,type,source
+192.0.2.10,ip,fixture
+198.51.100.7,ip,fixture
+example-malicious.test,domain,fixture

@@ -1,0 +1,4 @@
+CREATE TABLE IF NOT EXISTS demo_ping (
+    id SERIAL PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
