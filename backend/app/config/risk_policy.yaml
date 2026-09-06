@@ -1,6 +1,10 @@
 version: 0.1
 
 risk_scoring:
+  severity_levels:
+    low: 1
+    medium: 2
+    high: 3
   component_weights:
     rule_hit: 1
     ml_flow_anomaly: 1
@@ -10,6 +14,9 @@ risk_scoring:
     medium_min: 2
     high_min: 4
   hard_height_override: true
+
+delivery:
+  push_min_severity: medium
 
 windows:
   flow_model_feature_minutes: 5
