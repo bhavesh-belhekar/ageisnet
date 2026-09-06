@@ -1,0 +1,29 @@
+# Secrets & env (RULES.md Section 6)
+.env
+
+# Trained models & datasets (RULES.md Section 7)
+data/model_artifacts/*.pkl
+data/model_artifacts/*.pt
+data/training_baselines/*.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Node / frontend
+node_modules/
+dist-frontend/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Logs
+*.log
