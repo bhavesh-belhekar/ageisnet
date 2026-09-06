@@ -22,3 +22,23 @@ ml_thresholds:
 
 false_positives:
   fp_target_on_clean_baseline: 0.10
+
+rules:
+  known_bad_ports:
+    - 23    # telnet
+    - 445   # SMB
+    - 3389  # RDP
+
+  restricted_ports:
+    - 22    # SSH
+    - 3389  # RDP
+
+  restricted_connections:
+    - dst_container: "demo-db"
+      dst_port: 5432
+      allowed_sources:
+        - "bfa91286e27b"   # demo-api (12-char docker container ID)
+      description: "Only demo-api may reach demo-db:5432"
+
+  port_scan_threshold: 5
+  port_scan_window_seconds: 30

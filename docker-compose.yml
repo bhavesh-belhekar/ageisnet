@@ -116,6 +116,8 @@ services:
     env_file:
       - path: .env
         required: false
+    volumes:
+      - ./data/threat_intel:/data/threat_intel:ro
     environment:
       POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
       REDIS_HOST: ${REDIS_HOST:-redis}

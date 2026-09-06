@@ -36,6 +36,25 @@ CREATE INDEX IF NOT EXISTS idx_raw_events_direction  ON raw_events (direction);
 CREATE INDEX IF NOT EXISTS idx_raw_events_type       ON raw_events (event_type);
 """
 
+ALERT_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS raw_alerts (
+    alert_id            BIGSERIAL PRIMARY KEY,
+    event_id            BIGINT       NOT NULL,
+    container_id        VARCHAR(12)  NOT NULL,
+    timestamp           TIMESTAMPTZ  NOT NULL,
+    detection_type      VARCHAR(8)   NOT NULL,
+    severity            VARCHAR(8)   NOT NULL,
+    mitre_technique_id  VARCHAR(16),
+    description         TEXT         NOT NULL,
+    acknowledged        BOOLEAN      NOT NULL DEFAULT FALSE
+);
+
+CREATE INDEX IF NOT EXISTS idx_raw_alerts_event    ON raw_alerts (event_id);
+CREATE INDEX IF NOT EXISTS idx_raw_alerts_container ON raw_alerts (container_id);
+CREATE INDEX IF NOT EXISTS idx_raw_alerts_severity ON raw_alerts (severity);
+CREATE INDEX IF NOT EXISTS idx_raw_alerts_mitre    ON raw_alerts (mitre_technique_id);
+"""
+
 INSERT_SQL = """
 INSERT INTO raw_events (
     event_id, container_id, event_timestamp, event_type,
@@ -43,6 +62,14 @@ INSERT INTO raw_events (
     bytes_sent, bytes_received, direction
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 ON CONFLICT (event_id) DO NOTHING
+"""
+
+INSERT_ALERT_SQL = """
+INSERT INTO raw_alerts (
+    event_id, container_id, timestamp, detection_type,
+    severity, mitre_technique_id, description, acknowledged
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING alert_id
 """
 
 
@@ -63,10 +90,28 @@ async def create_pool() -> asyncpg.Pool:
 
 
 async def ensure_schema(pool: asyncpg.Pool) -> None:
-    """Create the raw_events table and indexes if they do not exist."""
+    """Create the raw_events and raw_alerts tables and indexes if missing."""
     async with pool.acquire() as conn:
         await conn.execute(SCHEMA_SQL)
-    logger.info("raw_events schema ensured")
+        await conn.execute(ALERT_SCHEMA_SQL)
+    logger.info("raw_events + raw_alerts schema ensured")
+
+
+async def save_alert(pool: asyncpg.Pool, alert: dict) -> int:
+    """Persist one alert dict to raw_alerts, returning the generated alert_id."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            INSERT_ALERT_SQL,
+            alert["event_id"],
+            alert["container_id"],
+            alert["timestamp"],
+            alert["detection_type"],
+            alert["severity"],
+            alert.get("mitre_technique_id"),
+            alert["description"],
+            alert.get("acknowledged", False),
+        )
+    return row["alert_id"]
 
 
 async def save_event(pool: asyncpg.Pool, event: dict) -> None:

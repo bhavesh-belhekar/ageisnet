@@ -35,6 +35,7 @@ _LOGGING = {
     "loggers": {
         "event_consumer": {"level": "INFO", "handlers": ["default"]},
         "postgres": {"level": "INFO", "handlers": ["default"]},
+        "rule_engine": {"level": "INFO", "handlers": ["default"]},
     },
 }
 
