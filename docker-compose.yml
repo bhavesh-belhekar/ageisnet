@@ -9,12 +9,27 @@ services:
   ebpf-agent:
     build: ./capture/ebpf-agent
     privileged: true
+    pid: "host"
     cap_add:
       - CAP_BPF
       - CAP_NET_ADMIN
       - CAP_SYS_ADMIN
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    environment:
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-aegisnet}
     volumes:
       - /sys/kernel/btf:/sys/kernel/btf:ro
+      - /sys/kernel/tracing:/sys/kernel/tracing:rw
+      - /sys/kernel/debug:/sys/kernel/debug:rw
+      - /lib/modules:/lib/modules:ro
+      - /usr/src:/usr/src:ro
+      - /proc:/proc:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
     depends_on:
       redis:
         condition: service_healthy

@@ -160,9 +160,20 @@ Docker Host → eBPF (TC + XDP) → Event Pipeline (Redis Streams) → FastAPI B
 
 **Event** (raw, from eBPF)
 ```
-event_id, container_id, timestamp, src_ip, dst_ip, src_port, dst_port,
-protocol, bytes_sent, bytes_received, direction (internal/external)
+event_id, container_id, timestamp, event_type (open/close), src_ip, dst_ip,
+src_port, dst_port, protocol, bytes_sent, bytes_received,
+direction (internal/external)
 ```
+
+> **Schema amendment (2026-09-06):** Originally signed off as an 11-field
+> contract (PRD v1). This version adds `event_type` (`open`/`close`) — 12
+> fields — so downstream consumers (rule engine, ML, TimescaleDB/Neo4j
+> writers) can distinguish a connection's open from its close without an
+> implicit `bytes == 0` heuristic (fragile: a zero-byte transfer would
+> otherwise be misclassified as an open). An open event carries the byte
+> counts observed up to ESTABLISHED (normally 0/0); the close event carries
+> the final counts for that socket. This amendment was approved by the
+> author before Phase 3 implementation began.
 
 **Alert**
 ```

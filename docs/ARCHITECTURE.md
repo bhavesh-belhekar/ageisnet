@@ -33,7 +33,7 @@ Runs privileged on the Docker host. Attaches eBPF programs via:
 - **TC hooks** — capture internal/east-west traffic (container-to-container, on veth interfaces).
 - **XDP hooks** — capture external/north-south traffic (container-to-internet, at the network card level for speed).
 
-**Responsibility:** Produce `RawEvent` messages (connection metadata, byte counts, container attribution) onto the event pipeline. Nothing else — no detection logic lives here. Container attribution is implemented in the loader (Phase 2) by correlating the veth/interface index seen on a captured packet back to the container's network namespace — attribution is never read directly off the raw XDP packet.
+**Responsibility:** Produce `RawEvent` messages (connection metadata, byte counts, container attribution, `event_type` open/close per the frozen schema in `PRD.md` Section 9) onto the event pipeline. Nothing else — no detection logic lives here. Container attribution is implemented in the loader (Phase 2) by correlating the veth/interface index seen on a captured packet back to the container's network namespace — attribution is never read directly off the raw XDP packet.
 
 ### 3.2 Event Pipeline — `redis-streams`
 **Responsibility:** Durable buffer between the eBPF agent and the Detection Engine. Decouples producer speed (kernel events can spike) from consumer speed (ML inference takes longer than a raw event arrival), and allows event replay for retraining ML models later.

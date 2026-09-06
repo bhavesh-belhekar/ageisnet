@@ -1,0 +1,72 @@
+kprobe:tcp_connect
+{
+    $sk = (uint64)arg0;
+    $nn = (uint64)curtask->nsproxy->net_ns->ns.inum;
+    if (@net[$sk] == 0) {
+        @net[$sk] = $nn;
+    }
+}
+
+kretprobe:inet_csk_accept
+{
+    $cs = (uint64)(uint64)retval;
+    $nn = (uint64)curtask->nsproxy->net_ns->ns.inum;
+    if ($cs != 0 && @net[$cs] == 0) {
+        @net[$cs] = $nn;
+    }
+}
+
+kprobe:tcp_sendmsg
+{
+    $sk = (uint64)arg0;
+    @sent[$sk] += arg2;
+}
+
+kprobe:tcp_cleanup_rbuf
+{
+    $sk = (uint64)arg0;
+    $n = arg1;
+    if ($n > 0) {
+        @recv[$sk] += $n;
+    }
+}
+
+tracepoint:sock:inet_sock_set_state
+/ args->family == 2 && args->protocol == 6 && args->newstate == 1 &&
+  !@opened[(uint64)args->skaddr] /
+{
+    $sk = (uint64)args->skaddr;
+    @opened[$sk] = 1;
+    $nn = @net[$sk];
+    if ($nn != 0) {
+        printf("EVTO|%u|%s|%s|%u|%u|%u|%u|%d\n",
+            $nn,
+            ntop(2, args->saddr), ntop(2, args->daddr),
+            args->sport, args->dport,
+            @sent[$sk], @recv[$sk],
+            pid);
+    }
+}
+
+tracepoint:sock:inet_sock_set_state
+/ args->family == 2 && args->protocol == 6 &&
+  (args->newstate == 4 || args->newstate == 6 || args->newstate == 7 || args->newstate == 9) &&
+  !@done[(uint64)args->skaddr] /
+{
+    $sk = (uint64)args->skaddr;
+    $nn = @net[$sk];
+    if ($nn == 0) {
+        $nn = (uint64)curtask->nsproxy->net_ns->ns.inum;
+    }
+    @done[$sk] = 1;
+    printf("EVTC|%u|%s|%s|%u|%u|%u|%u|%d\n",
+        $nn,
+        ntop(2, args->saddr), ntop(2, args->daddr),
+        args->sport, args->dport,
+        @sent[$sk], @recv[$sk],
+        pid);
+    delete(@sent[$sk]);
+    delete(@recv[$sk]);
+    delete(@opened[$sk]);
+    delete(@net[$sk]);
+}

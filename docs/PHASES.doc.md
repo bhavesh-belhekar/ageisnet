@@ -90,6 +90,18 @@ Think of it like constructing a building: you don't show tenants a "Phase 1 buil
 
 **Risk flag:** This is the highest-risk phase (see `PRD.md` Section 13). If it stalls, Phase 3 can continue independently using a temporary mock event publisher that writes directly to Redis in the correct schema — this unblocks downstream work without changing final scope.
 
+**Note (Phase 2 sign-off, 2026-09-06):** Per-event shape for Phase 3 —
+the final libbpf + CO-RE capture emits **4 events per internal TCP
+connection**: client open, server open (both 0/0), client close, server
+close (each with the socket-owner byte totals). The bpftrace prototype
+used for Phase 2 validation emits only **3** (the server-side OPEN is
+silently dropped because its ESTABLISHED transition races `accept()` and
+attribution falls back to execution context). Any Phase 3 rule-engine
+test fixtures / mock event publishers **must be built against the
+4-event CO-RE shape**, not the 3-event prototype shape, so consumers are
+not surprised by the extra server open later. Correlation field values
+and the frozen schema are unchanged (see `PRD.md` Section 9).
+
 ---
 
 ## 6. Phase 3 — Rule-Based Detection

@@ -13,12 +13,20 @@ class Direction(StrEnum):
     EXTERNAL = "external"
 
 
+class EventType(StrEnum):
+    """Phase of a TCP connection lifecycle."""
+
+    OPEN = "open"
+    CLOSE = "close"
+
+
 class Event(BaseModel):
     """Frozen raw capture schema (PRD.md Section 9)."""
 
     event_id: int
     container_id: str
     timestamp: datetime
+    event_type: EventType
     src_ip: str
     dst_ip: str
     src_port: int
