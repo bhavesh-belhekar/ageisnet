@@ -1,4 +1,5 @@
 indicator,type,source
 192.0.2.10,ip,fixture
 198.51.100.7,ip,fixture
+172.18.0.100,ip,demo-attacker
 example-malicious.test,domain,fixture

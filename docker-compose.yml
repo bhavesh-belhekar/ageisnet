@@ -190,8 +190,8 @@ services:
 
   attacker-sim:
     build: ./attacker-sim
-    volumes:
-      - ./scripts/attack_scenarios:/attacks/scripts:ro
+    stdin_open: true
+    tty: true
     profiles:
       - attack
     restart: "no"

@@ -1,11 +1,39 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <title>demo-web</title>
-  </head>
-  <body>
-    <h1>demo-app / web</h1>
-    <p>Victim app placeholder — Phase 7.</p>
-  </body>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Demo Shop — AegisNet Victim App</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: system-ui, sans-serif; background: #111827; color: #e5e7eb; padding: 2rem; }
+        h1 { color: #60a5fa; margin-bottom: 1rem; }
+        .status { padding: 1rem; background: #1f2937; border-radius: 8px; margin: 1rem 0; }
+        .status h2 { font-size: 1rem; color: #9ca3af; margin-bottom: 0.5rem; }
+        #output { white-space: pre-wrap; font-family: monospace; font-size: 0.85rem; color: #a5b4fc; }
+        .info { color: #6b7280; font-size: 0.85rem; margin-top: 1rem; }
+    </style>
+</head>
+<body>
+    <h1>Demo Shop</h1>
+    <p class="info">Victim application for AegisNet IDS demo — generates normal traffic between web, API, and database containers.</p>
+    <div class="status">
+        <h2>API Health</h2>
+        <div id="output">Loading...</div>
+    </div>
+    <script>
+        async function checkHealth() {
+            try {
+                const res = await fetch('/health');
+                const data = await res.json();
+                document.getElementById('output').textContent =
+                    `Status: ${data.status}\nDB: ${data.db_connected ? 'Connected' : 'Disconnected'}\nTime: ${data.timestamp}`;
+            } catch (e) {
+                document.getElementById('output').textContent = `Error: ${e.message}`;
+            }
+        }
+        checkHealth();
+        setInterval(checkHealth, 10000);
+    </script>
+</body>
 </html>

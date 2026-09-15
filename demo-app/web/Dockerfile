@@ -1,3 +1,8 @@
-FROM nginx:1.27-alpine
+FROM python:3.12-slim
 
-COPY index.html /usr/share/nginx/html/index.html
+WORKDIR /srv
+COPY server.py .
+COPY index.html .
+
+EXPOSE 80
+CMD ["python", "server.py"]

@@ -51,7 +51,7 @@ rules:
     - dst_container: "demo-db"
       dst_port: 5432
       allowed_sources:
-        - "bfa91286e27b"   # demo-api (12-char docker container ID)
+        - "8f067cabaefa"   # demo-api (12-char docker container ID)
       description: "Only demo-api may reach demo-db:5432"
 
   port_scan_threshold: 5
