@@ -17,6 +17,7 @@ Features per window:
 
 Usage (from repo root, with Postgres reachable):
     python scripts/collect_baseline.py
+    python scripts/collect_baseline.py --since 2026-09-15T19:24:00+00:00
 
 Env vars (same as backend): POSTGRES_HOST, POSTGRES_PORT, POSTGRES_USER,
 POSTGRES_PASSWORD, POSTGRES_DB — or fall back to .env / defaults.
@@ -78,18 +79,37 @@ def _connect():
     )
 
 
-def _fetch_external_events(conn) -> list[dict]:
-    """Fetch all external close events from raw_events."""
+def _fetch_external_events(conn, since: str | None = None) -> list[dict]:
+    """Fetch external close events from raw_events.
+
+    Args:
+        since: ISO-8601 timestamp.  If provided, only events with
+               ``event_timestamp >= since`` are returned.  This avoids
+               polluting a clean baseline with historical traffic from
+               earlier phases.
+    """
     cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT container_id, event_timestamp, event_type,
-               dst_ip, dst_port, bytes_sent, bytes_received
-        FROM raw_events
-        WHERE direction = 'external'
-        ORDER BY container_id, event_timestamp
-        """
-    )
+    if since:
+        cur.execute(
+            """
+            SELECT container_id, event_timestamp, event_type,
+                   dst_ip, dst_port, bytes_sent, bytes_received
+            FROM raw_events
+            WHERE direction = 'external' AND event_timestamp >= %s
+            ORDER BY container_id, event_timestamp
+            """,
+            (since,),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT container_id, event_timestamp, event_type,
+                   dst_ip, dst_port, bytes_sent, bytes_received
+            FROM raw_events
+            WHERE direction = 'external'
+            ORDER BY container_id, event_timestamp
+            """
+        )
     rows = cur.fetchall()
     cur.close()
     return [
@@ -181,11 +201,35 @@ def _write_csv(rows: list[dict], path: Path) -> None:
 
 
 def main() -> None:
+    import argparse
+    from datetime import datetime, timezone
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--since",
+        type=str,
+        default=None,
+        help=(
+            "ISO-8601 timestamp (e.g. 2026-09-15T19:24:00+00:00). "
+            "Only events at or after this time are included.  Use this "
+            "to isolate a clean baseline window and exclude historical "
+            "traffic from earlier phases."
+        ),
+    )
+    args = parser.parse_args()
+
+    # Validate --since is parseable
+    if args.since:
+        try:
+            datetime.fromisoformat(args.since)
+        except ValueError:
+            sys.exit(f"ERROR: --since value '{args.since}' is not valid ISO-8601")
+
     print("Connecting to Postgres...")
     conn = _connect()
 
-    print("Fetching external events...")
-    events = _fetch_external_events(conn)
+    print(f"Fetching external events{' (since ' + args.since + ')' if args.since else ''}...")
+    events = _fetch_external_events(conn, since=args.since)
     conn.close()
     print(f"  Fetched {len(events)} external events")
 

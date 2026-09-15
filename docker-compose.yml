@@ -118,7 +118,7 @@ services:
         required: false
     volumes:
       - ./data/threat_intel:/data/threat_intel:ro
-      - ./data/model_artifacts:/data/model_artifacts:ro
+      - ./data/model_artifacts:/data/model_artifacts
     environment:
       POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
       REDIS_HOST: ${REDIS_HOST:-redis}
