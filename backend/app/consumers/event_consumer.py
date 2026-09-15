@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import traceback
 
 import asyncpg
@@ -472,6 +473,16 @@ async def _process_one(
     hub: AlertHub | None = None,
 ) -> None:
     """Validate, persist, evaluate rules, and ACK a single stream message."""
+    # --- Detection latency measurement (NFR: <2s) ---
+    # Redis stream ID format: <millisecondsTime>-<sequenceNumber>
+    try:
+        stream_ms = int(raw_id.decode().split(b"-")[0])
+        stream_ts = stream_ms / 1000.0
+    except Exception:
+        stream_ts = time.time()  # fallback to wall clock
+
+    t_start = time.monotonic()
+
     try:
         payload = json.loads(fields[b"event"])
         event = Event.model_validate(payload)
@@ -484,6 +495,8 @@ async def _process_one(
         )
         return  # don't ACK — message stays in PEL for redelivery
 
+    t_after_validate = time.monotonic()
+
     try:
         await save_event(pool, event.model_dump())
     except Exception:
@@ -495,11 +508,32 @@ async def _process_one(
         )
         return  # don't ACK — redeliver on next consumer start
 
+    t_after_save = time.monotonic()
     await _run_rules(redis, pool, event, hub)
+    t_after_rules = time.monotonic()
     await _run_ml(redis, pool, event, hub)
+    t_after_ml = time.monotonic()
     await _run_graph_ml(redis, pool, event, hub)
+    t_after_graph = time.monotonic()
 
     await redis.xack(STREAM, GROUP, raw_id)
+
+    # --- Log detection latency ---
+    wall_now = time.time()
+    e2e_latency_ms = (wall_now - stream_ts) * 1000
+    pipeline_ms = (t_after_graph - t_start) * 1000
+    logger.info(
+        "detection_latency event_id=%s e2e=%.1fms pipeline=%.1fms "
+        "(validate=%.1f save=%.1f rules=%.1f ml=%.1f graph=%.1f)",
+        event.event_id,
+        e2e_latency_ms,
+        pipeline_ms,
+        (t_after_validate - t_start) * 1000,
+        (t_after_save - t_after_validate) * 1000,
+        (t_after_rules - t_after_save) * 1000,
+        (t_after_ml - t_after_rules) * 1000,
+        (t_after_graph - t_after_ml) * 1000,
+    )
 
 
 async def consumer_loop(
