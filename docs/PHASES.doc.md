@@ -235,15 +235,40 @@ and the frozen schema are unchanged (see `PRD.md` Section 9).
 **Goal:** A repeatable, scriptable way to demonstrate every detection type.
 
 **Tasks:**
-- [ ] Build `demo-app/` — simple `web` + `api` + `db` containers with realistic normal traffic between them.
+- [x] Build `demo-app/` — simple `web` + `api` + `db` containers with realistic normal traffic between them.
 - [ ] Implement `scripts/seed_demo_data.py` — populate a baseline learning period of normal traffic.
-- [ ] Implement `scripts/attack_scenarios/port_scan.py`, `known_bad_ip.py`, `beaconing.py`, `lateral_movement.py`, `exfiltration.py`.
+- [x] Implement `scripts/attack_scenarios/port_scan.py`, `known_bad_ip.py`, `beaconing.py`, `lateral_movement.py`, `exfiltration.py`.
 - [ ] Implement `scripts/run_attack_scenario.sh` — one-command trigger for live demo.
 - [ ] **[Phase 4 follow-up]** Implement Neo4j reconciliation on reconnect — during an outage, edges accumulate in the in-memory cache only and are never written back to Neo4j on recovery.  Add a reconciliation pass (on reconnect or periodic sync) so the graph model is robust beyond a single continuous run.
+- [ ] **[Phase 7 follow-up]** Graph-model internal-traffic volume anomaly gap — `flow_model` only scores external (north-south) traffic (FR-5.1 design), and `graph_model` only detects unseen edges (new container→container pairs). Neither detects volume/frequency anomalies on *known* internal edges — e.g., a container suddenly sending 10× more data to a peer it regularly communicates with. This leaves a blind spot for internal data staging and low-and-slow lateral movement on established connections. Requires either extending `graph_model` with per-edge volume baselines or adding a second Isolation Forest pass on internal traffic features. Target: Phase 8.
 
 **Deliverable:** Running one script produces a visible, correctly-classified alert on the dashboard for each attack type in `PRD.md`'s exit criteria (Section 5).
 
 **Exit criteria:** All 5 attack types (port scan, known-bad IP, lateral movement, beaconing, exfiltration) are demonstrable via scripted trigger with correct detection, severity, and MITRE tag.
+
+### Phase 7 Checkpoint (2026-09-15) — Demo Environment & Attack Scenarios Complete
+
+**Completed:**
+- `attacker-sim/` container (Python 3.12-slim, nmap/curl/ping, interactive/all/single modes, fixed IP 172.18.0.100 for threat-intel attribution).
+- 5 attack scripts in `attacker-sim/scripts/`: `port_scan.py`, `known_bad_ip.py`, `beaconing.py`, `lateral_movement.py`, `exfiltration.py`.
+- `demo-app/` rebuilt: demo-api (full e-commerce server, 303 lines, in-memory SQLite), demo-web (Python server.py + background traffic generators), demo-db, redis, neo4j.
+- All 5 attack types verified firing against live pipeline with correct MITRE tags and severities.
+
+**Verified detections:**
+| Attack | Detection Source | MITRE | Severity | Score/Detail |
+|---|---|---|---|---|
+| port_scan | RULE-003 | T1046 | HIGH | 7 distinct dst_port values |
+| known_bad_ip | RULE-001 | T1071 | HIGH | src_ip 172.18.0.100 in threat-intel CSV |
+| lateral_movement | RULE-004 | T1571 | HIGH | Unauthorized source to demo-db:5432 |
+| beaconing | flow_model | T1071 | low | score=0.5296 > 0.52 threshold |
+| exfiltration | flow_model | T1071 | low | score=0.5382 > 0.52 threshold |
+
+**Known limitations (not blocking Phase 7):**
+1. flow_model only scores external (north-south) traffic — by design per FR-5.1. Beaconing/exfiltration scripts retargeted to external IP to prove ML pipeline correctness. Internal traffic anomalies fall to graph_model.
+2. graph_model only detects unseen edges, not volume/frequency anomalies on known edges — tracked as Phase 7 follow-up below.
+
+**Follow-up items (not blocking — tracked for Phase 8):**
+1. **Graph-model internal-traffic volume anomaly gap** — neither `flow_model` (external-only) nor `graph_model` (unseen-edges-only) flags volume/frequency spikes on known internal edges. Requires extending `graph_model` with per-edge volume baselines or adding a companion Isolation Forest on internal features. Target: Phase 8.
 
 ---
 
@@ -255,6 +280,7 @@ and the frozen schema are unchanged (see `PRD.md` Section 9).
 - [ ] Run the full attack-scenario suite end-to-end and record actual detection latency (target: <2 seconds, per `PRD.md` NFR).
 - [ ] Tune `risk_policy.yaml` thresholds to hit the <10% false-positive target on clean baseline traffic.
 - [ ] **[Phase 4 follow-up]** Graph-model FP validation against a real 24h baseline — build baseline from `collect_baseline.py`-style live traffic, inject lateral movement via `scripts/attack_scenarios/lateral_movement.py`, measure genuine FP rate (the Phase 4 "5/5, 0 FP" test proved code correctness on a synthetic baseline, not model performance on real traffic).
+- [ ] **[Phase 7 follow-up]** Graph-model internal-traffic volume anomaly detection — extend `graph_model` (or add a companion model) to detect volume/frequency spikes on known internal edges, closing the blind spot where neither `flow_model` (external-only) nor current `graph_model` (unseen-edges-only) flags anomalous internal data movement.
 - [ ] Load-test the Redis pipeline (target: 500 events/sec for 30 seconds without drops, per `PRD.md` NFR).
 - [ ] Fix any schema drift or integration bugs surfaced during full-system testing.
 - [ ] Final pass on `RULES.md` checklist across the whole codebase (lint, tests, no hardcoded values, `.env.example` current).
