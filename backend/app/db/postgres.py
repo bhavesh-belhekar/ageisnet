@@ -152,6 +152,24 @@ def _event_row(record: asyncpg.Record) -> dict:
     return row
 
 
+def _parse_shap(row: dict) -> dict:
+    """Deserialize shap_explanation from JSON string to dict if needed.
+
+    asyncpg returns JSONB columns as strings when they were stored via
+    json.dumps().  The Alert Pydantic model expects a dict, so we
+    deserialize here before handing rows to the API layer.
+    """
+    import json
+
+    val = row.get("shap_explanation")
+    if isinstance(val, str):
+        try:
+            row["shap_explanation"] = json.loads(val)
+        except (json.JSONDecodeError, TypeError):
+            pass  # leave as-is if unparseable
+    return row
+
+
 def _build_where(
     columns: dict[str, str],
     values: dict[str, object],
@@ -248,14 +266,14 @@ async def list_alerts(
     """
     async with pool.acquire() as conn:
         rows = await conn.fetch(sql, *params)
-    return [dict(r) for r in rows]
+    return [_parse_shap(dict(r)) for r in rows]
 
 
 async def get_alert(pool: asyncpg.Pool, alert_id: int) -> dict | None:
     """Return one alert by id, or None."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM raw_alerts WHERE alert_id = $1", alert_id)
-    return dict(row) if row else None
+    return _parse_shap(dict(row)) if row else None
 
 
 async def ack_alert(pool: asyncpg.Pool, alert_id: int, acknowledged: bool) -> dict | None:
@@ -266,4 +284,27 @@ async def ack_alert(pool: asyncpg.Pool, alert_id: int, acknowledged: bool) -> di
             alert_id,
             acknowledged,
         )
-    return dict(row) if row else None
+    return _parse_shap(dict(row)) if row else None
+
+
+async def update_alert_shap(pool: asyncpg.Pool, alert_id: int, shap_explanation: dict) -> bool:
+    """Attach a SHAP/rule-based explanation to an existing alert.
+
+    Called asynchronously after the alert has already been persisted and
+    pushed to the dashboard (FR-11.2).  Returns True on success.
+    """
+    import json
+
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE raw_alerts SET shap_explanation = $2 WHERE alert_id = $1",
+            alert_id,
+            json.dumps(shap_explanation),
+        )
+    # result is like "UPDATE 1"
+    success = result.endswith("1")
+    if success:
+        logger.info("SHAP explanation attached to alert %d", alert_id)
+    else:
+        logger.warning("SHAP update returned %r for alert %d", result, alert_id)
+    return success

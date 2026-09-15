@@ -1,20 +1,48 @@
-import AlertDetail from "./components/AlertDetail";
+import { useAlertsSocket } from "./hooks/useAlertsSocket";
 import AlertFeed from "./components/AlertFeed";
 import NetworkGraph from "./components/NetworkGraph";
-import ShapExplanationPanel from "./components/ShapExplanationPanel";
+import AlertDetail from "./components/AlertDetail";
 
 export default function App() {
+  const {
+    alerts,
+    connectionState,
+    lastError,
+    selectedAlertId,
+    setSelectedAlertId,
+  } = useAlertsSocket();
+
+  const selectedAlert = alerts.find((a) => a.alert_id === selectedAlertId) ?? null;
+
   return (
-    <main className="min-h-screen bg-slate-900 p-8 text-slate-100">
-      <h1 className="mb-2 text-2xl font-bold">AegisNet Dashboard</h1>
-      <p className="mb-6 text-slate-400">
-        Phase 1 placeholder — live components arrive in Phase 6.
-      </p>
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-        <AlertFeed />
-        <NetworkGraph />
-        <AlertDetail />
-        <ShapExplanationPanel />
+    <main className="flex h-screen flex-col bg-slate-900 text-slate-100">
+      {/* Top bar */}
+      <header className="flex items-center gap-3 border-b border-slate-700 px-6 py-3">
+        <h1 className="text-xl font-bold">AegisNet</h1>
+        <span className="text-sm text-slate-400">Intrusion Detection Dashboard</span>
+      </header>
+
+      {/* Main content: left feed + right detail/graph */}
+      <div className="flex min-h-0 flex-1">
+        {/* Left column — Alert Feed (full height, scrollable) */}
+        <div className="w-[420px] shrink-0 border-r border-slate-700">
+          <AlertFeed
+            alerts={alerts}
+            connectionState={connectionState}
+            lastError={lastError}
+            selectedAlertId={selectedAlertId}
+            onSelectAlert={setSelectedAlertId}
+          />
+        </div>
+
+        {/* Right column — Network Graph / Alert Detail */}
+        <div className="flex min-w-0 flex-1 flex-col">
+          {selectedAlert ? (
+            <AlertDetail alert={selectedAlert} onClose={() => setSelectedAlertId(null)} />
+          ) : (
+            <NetworkGraph />
+          )}
+        </div>
       </div>
     </main>
   );

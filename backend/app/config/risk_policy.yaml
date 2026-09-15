@@ -24,8 +24,15 @@ windows:
   port_scan_window_seconds: 30
 
 ml_thresholds:
-  flow_model_anomaly_threshold: 0.6
+  flow_model_anomaly_threshold: 0.52
   graph_new_edge_threshold: 1.0
+
+flow_model:
+  cap_percentile: 0.99         # cap continuous features at 99th percentile
+  cap_exclude:                 # features excluded from capping (near-binary /
+    - unique_dst_ips           # categorical — capping collapses variance to 0)
+  contamination: 0.05         # Isolation Forest expected anomaly fraction
+  random_state: 42            # reproducibility seed
 
 false_positives:
   fp_target_on_clean_baseline: 0.10

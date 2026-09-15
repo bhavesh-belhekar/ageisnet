@@ -3,8 +3,8 @@
 Reads from ``events:raw`` via a consumer group, validates each event against
 the frozen Pydantic schema, persists to Postgres, and ACKs on success.
 
-After persistence, each event is handed to the rule engine; generated alerts
-are persisted to ``raw_alerts``.
+After persistence, each event is handed to the rule engine AND the ML
+engine in sequence; generated alerts are persisted to ``raw_alerts``.
 
 Error handling (RULES.md Section 4.3): one bad/malformed event never stops
 the consumer loop — the event is logged at ERROR and processing continues.
@@ -15,6 +15,7 @@ exceed ``MAX_DELIVERIES`` delivery attempts are dead-lettered to
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import traceback
@@ -22,7 +23,8 @@ import traceback
 import asyncpg
 import redis.asyncio as aioredis
 
-from app.db.postgres import save_alert, save_event
+from app.db.postgres import save_alert, save_event, update_alert_shap
+from app.models.alert import Alert, DetectionType, Severity
 from app.models.event import Event
 from app.risk_scoring.scorer import RiskScorer
 from app.rule_engine.engine import RuleEngine
@@ -40,6 +42,89 @@ MAX_DELIVERIES = 5
 
 _engine: RuleEngine | None = None
 _scorer: RiskScorer | None = None
+
+
+# --- Lazy imports for ML (avoids circular / heavy imports at module load) ---
+
+
+def _get_flow_inference():
+    """Lazy-import the flow model inference module."""
+    from app.ml_engine.flow_model import infer as flow_infer
+
+    return flow_infer
+
+
+def _get_graph_inference():
+    """Lazy-import the graph model inference module."""
+    from app.ml_engine.graph_model import infer as graph_infer
+
+    return graph_infer
+
+
+def _get_shap_explainer():
+    """Lazy-import the SHAP explainability module."""
+    from app.explainability import shap_explainer
+
+    return shap_explainer
+
+
+async def _compute_shap_async(
+    pool: asyncpg.Pool,
+    hub: AlertHub | None,
+    alert_id: int,
+    event: Event,
+    signal: dict,
+    features: dict | None = None,
+    scaled_vector: list[float] | None = None,
+    detail: dict | None = None,
+    baseline_size: int = 0,
+) -> None:
+    """Compute SHAP/rule-based explanation and attach to the alert.
+
+    Runs as a fire-and-forget asyncio task after the alert has already
+    been persisted and pushed to the dashboard (FR-11.2).
+    """
+    try:
+        explainer = _get_shap_explainer()
+
+        if signal.get("kind") == "ml_flow" and features is not None and scaled_vector is not None:
+            from app.ml_engine.flow_model.features import FEATURE_ORDER
+
+            explanation = await explainer.explain_flow(
+                alert_id, FEATURE_ORDER, features, scaled_vector,
+            )
+        elif signal.get("kind") == "ml_graph" and detail is not None:
+            explanation = await explainer.explain_graph(alert_id, detail, baseline_size)
+        else:
+            logger.debug("no explainer path for signal kind=%s — skipping", signal.get("kind"))
+            return
+
+        if explanation is None:
+            logger.warning("explanation returned None for alert %d — skipping DB update", alert_id)
+            return
+
+        success = await update_alert_shap(pool, alert_id, explanation)
+        if not success:
+            return
+
+        # Push WebSocket follow-up so the dashboard can populate the SHAP panel
+        if hub is not None:
+            try:
+                await hub.publish({
+                    "alert_id": alert_id,
+                    "event_id": event.event_id,
+                    "shap_explanation": explanation,
+                    "update_type": "shap_attachment",
+                })
+            except Exception:
+                logger.warning("WebSocket follow-up push failed for alert %d", alert_id)
+
+    except Exception:
+        logger.error(
+            "async SHAP computation failed for alert %d\n%s",
+            alert_id,
+            traceback.format_exc(),
+        )
 
 
 def _get_engine() -> RuleEngine:
@@ -164,6 +249,221 @@ async def _run_rules(
             )
 
 
+async def _run_graph_ml(
+    redis: aioredis.Redis,
+    pool: asyncpg.Pool,
+    event: Event,
+    hub: AlertHub | None = None,
+) -> None:
+    """Run graph-model anomaly scoring on internal events; persist any alerts.
+
+    Only scores internal (east-west) events.  Flags new container-to-container
+    edges that were not seen during the 24-hour baseline window (FR-2.2 / FR-5.2).
+    """
+    from app.models.event import Direction
+
+    if event.direction != Direction.INTERNAL:
+        return
+
+    graph_infer = _get_graph_inference()
+    try:
+        signal = await graph_infer.score_graph_event(event)
+    except Exception:
+        logger.error(
+            "graph model scoring failed for event_id=%s\n%s",
+            event.event_id,
+            traceback.format_exc(),
+        )
+        return
+
+    if signal is None:
+        return
+
+    # The graph model returns score=1.0 for new edges (binary heuristic).
+    # Check against the graph_new_edge_threshold from config.
+    scorer = _get_scorer()
+    threshold = scorer._ml_thresholds.get("graph_new_edge_threshold", 1.0)
+    if signal["score"] < threshold:
+        return
+
+    # Build severity from graph signal alone
+    combined = scorer.score([signal])
+
+    # Map to MITRE technique (FR-12) — use specific technique for lateral movement
+    detail = signal.get("detail", {})
+    reason = detail.get("reason", "")
+    mitre_id = _resolve_mitre("ml", "graph_lateral_movement")
+
+    description = (
+        f"New internal edge detected: {detail.get('src', '?')} → "
+        f"{detail.get('dst', '?')}:{detail.get('port', '?')} "
+        f"({reason})"
+    )
+
+    alert = Alert(
+        event_id=event.event_id,
+        container_id=event.container_id,
+        timestamp=event.timestamp,
+        detection_type=DetectionType.ML,
+        severity=combined,
+        mitre_technique_id=mitre_id,
+        description=description,
+        shap_explanation=None,
+    )
+
+    try:
+        alert_id = await save_alert(pool, alert.model_dump())
+        logger.info(
+            "graph ML alert %s persisted: event_id=%s container=%s score=%.4f severity=%s",
+            alert_id,
+            event.event_id,
+            event.container_id,
+            signal["score"],
+            combined.value,
+        )
+        if hub is not None:
+            payload = alert.model_dump(mode="json")
+            payload["alert_id"] = alert_id
+            await hub.publish(payload)
+
+        # Async explanation — fire-and-forget (FR-11.2)
+        asyncio.create_task(
+            _compute_shap_async(
+                pool, hub, alert_id, event, signal,
+                detail=detail,
+                baseline_size=detail.get("baseline_size", 0),
+            )
+        )
+    except Exception:
+        logger.error(
+            "graph ML alert persist failed for event_id=%s\n%s",
+            event.event_id,
+            traceback.format_exc(),
+        )
+
+
+async def _run_ml(
+    redis: aioredis.Redis,
+    pool: asyncpg.Pool,
+    event: Event,
+    hub: AlertHub | None = None,
+) -> None:
+    """Run ML anomaly scoring on the event; persist any ML alerts.
+
+    Runs in parallel logic to ``_run_rules`` but against the flow model.
+    The ML signal is also fed into the risk scorer so that ML-only alerts
+    get a proper severity label (FR-6).
+    """
+    flow_infer = _get_flow_inference()
+    try:
+        signal = await flow_infer.score_flow_event(redis, event)
+    except Exception:
+        logger.error(
+            "flow model scoring failed for event_id=%s\n%s",
+            event.event_id,
+            traceback.format_exc(),
+        )
+        return
+
+    if signal is None:
+        logger.info(
+            "flow model returned None for event_id=%s container=%s direction=%s",
+            event.event_id, event.container_id, event.direction.value,
+        )
+        return
+
+    # Check if the score crosses the anomaly threshold
+    scorer = _get_scorer()
+    threshold = scorer._ml_thresholds.get("flow_model_anomaly_threshold", 0.6)
+    logger.info(
+        "flow model score=%.4f threshold=%.2f event_id=%s",
+        signal["score"], threshold, event.event_id,
+    )
+    if signal["score"] < threshold:
+        logger.debug(
+            "flow model score %.4f below threshold %.2f for event_id=%s — no alert",
+            signal["score"],
+            threshold,
+            event.event_id,
+        )
+        return
+
+    # Build severity from ML signal alone (no rule hits mixed here)
+    combined = scorer.score([signal])
+
+    # Map to MITRE technique (FR-12)
+    mitre_id = _resolve_mitre("ml", "ml_flow_anomaly")
+
+    description = (
+        f"Flow anomaly detected: score={signal['score']:.4f} "
+        f"(threshold={threshold:.2f})"
+    )
+
+    alert = Alert(
+        event_id=event.event_id,
+        container_id=event.container_id,
+        timestamp=event.timestamp,
+        detection_type=DetectionType.ML,
+        severity=combined,
+        mitre_technique_id=mitre_id,
+        description=description,
+        shap_explanation=None,  # Phase 5: computed asynchronously
+    )
+
+    try:
+        alert_id = await save_alert(pool, alert.model_dump())
+        logger.info(
+            "ML alert %s persisted: event_id=%s container=%s score=%.4f severity=%s",
+            alert_id,
+            event.event_id,
+            event.container_id,
+            signal["score"],
+            combined.value,
+        )
+        if hub is not None:
+            payload = alert.model_dump(mode="json")
+            payload["alert_id"] = alert_id
+            await hub.publish(payload)
+
+        # Async SHAP — fire-and-forget after alert is visible on dashboard (FR-11.2)
+        asyncio.create_task(
+            _compute_shap_async(
+                pool, hub, alert_id, event, signal,
+                features=signal.get("features"),
+                scaled_vector=signal.get("scaled_vector"),
+            )
+        )
+    except Exception:
+        logger.error(
+            "ML alert persist failed for event_id=%s\n%s",
+            event.event_id,
+            traceback.format_exc(),
+        )
+
+
+def _resolve_mitre(detection_category: str, specific_type: str) -> str | None:
+    """Look up the MITRE ATT&CK technique ID for a detection type."""
+    try:
+        from pathlib import Path
+
+        import yaml
+
+        config_path = (
+            Path(__file__).resolve().parents[1] / "config" / "mitre_mapping.yaml"
+        )
+        with open(config_path) as f:
+            mapping = yaml.safe_load(f)
+
+        # Try specific type first, fall back to category-level
+        techniques = mapping.get("detection_type_to_technique", {})
+        return techniques.get(detection_category, {}).get(
+            specific_type, techniques.get("fallback", {}).get(specific_type)
+        )
+    except Exception:
+        logger.warning("MITRE lookup failed for %s/%s", detection_category, specific_type)
+        return None
+
+
 async def _process_one(
     redis: aioredis.Redis,
     pool: asyncpg.Pool,
@@ -196,6 +496,8 @@ async def _process_one(
         return  # don't ACK — redeliver on next consumer start
 
     await _run_rules(redis, pool, event, hub)
+    await _run_ml(redis, pool, event, hub)
+    await _run_graph_ml(redis, pool, event, hub)
 
     await redis.xack(STREAM, GROUP, raw_id)
 

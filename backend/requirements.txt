@@ -10,3 +10,6 @@ PyYAML==6.0.2
 pytest==8.3.4
 pytest-asyncio==0.25.2
 httpx==0.28.1
+psycopg2-binary==2.9.10
+scikit-learn==1.6.1
+shap==0.47.2

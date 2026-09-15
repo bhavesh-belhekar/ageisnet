@@ -118,11 +118,13 @@ services:
         required: false
     volumes:
       - ./data/threat_intel:/data/threat_intel:ro
+      - ./data/model_artifacts:/data/model_artifacts:ro
     environment:
       POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
       REDIS_HOST: ${REDIS_HOST:-redis}
       REDIS_PASSWORD: ${REDIS_PASSWORD:-aegisnet}
       NEO4J_HOST: ${NEO4J_HOST:-neo4j}
+      MODEL_ARTIFACT_DIR: /data/model_artifacts
     depends_on:
       postgres:
         condition: service_healthy
@@ -149,6 +151,9 @@ services:
 
   demo-web:
     build: ./demo-app/web
+    environment:
+      DEMO_API_HOST: demo-api
+      DEMO_API_PORT: "5000"
     depends_on:
       demo-api:
         condition: service_started
@@ -156,6 +161,10 @@ services:
 
   demo-api:
     build: ./demo-app/api
+    environment:
+      DEMO_DB_HOST: demo-db
+      DEMO_DB_PORT: "5432"
+      DEMO_API_PORT: "5000"
     depends_on:
       demo-db:
         condition: service_healthy
@@ -178,3 +187,11 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
+
+  attacker-sim:
+    build: ./attacker-sim
+    volumes:
+      - ./scripts/attack_scenarios:/attacks/scripts:ro
+    profiles:
+      - attack
+    restart: "no"
