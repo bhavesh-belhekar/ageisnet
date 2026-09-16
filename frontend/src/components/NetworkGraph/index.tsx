@@ -60,6 +60,21 @@ type AnyNode = any;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyLink = any;
 
+// Build the node set from MOCK_NODES plus any IDs referenced in MOCK_LINKS
+// that aren't already nodes — prevents "node not found" crashes when links
+// reference external IPs or containers not in the static node list.
+const ALL_NODE_IDS = new Set(MOCK_NODES.map((n) => n.id));
+for (const link of MOCK_LINKS) {
+  if (!ALL_NODE_IDS.has(link.source)) {
+    MOCK_NODES.push({ id: link.source, label: link.source, color: "#94a3b8", severity: "low" });
+    ALL_NODE_IDS.add(link.source);
+  }
+  if (!ALL_NODE_IDS.has(link.target)) {
+    MOCK_NODES.push({ id: link.target, label: link.target, color: "#94a3b8", severity: "low" });
+    ALL_NODE_IDS.add(link.target);
+  }
+}
+
 export default function NetworkGraph() {
   const fgRef = useRef<ForceGraphMethods>();
   const containerRef = useRef<HTMLDivElement>(null);
