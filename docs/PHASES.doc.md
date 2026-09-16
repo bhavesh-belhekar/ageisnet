@@ -364,6 +364,36 @@ and the frozen schema are unchanged (see `PRD.md` Section 9).
 2. Graph-model volume anomaly detection on internal edges — not implemented
 3. FP validation on24h baseline — scoped down to ~84 min (65 windows)
 
+### Phase 8 Checkpoint (2026-09-16) — ML Severity Calibration Resolved
+
+**Background:** During Phase 4, `ml_flow_anomaly` component weight was set to 1 (equal to `rule_hit`). Combined with `medium_min: 2`, this meant any ML-only detection always scored LOW, regardless of model confidence. The test `test_ml_flow_above_threshold_logs_a_low_placeholder_signal` explicitly documented this as a Phase 4 placeholder: *"scorer is extended when ML lands."*
+
+**Finding:** The placeholder was never updated when ML landed. At production threshold (0.52), ML-only alerts were persisted to Postgres but filtered out of WebSocket push by `push_min_severity: medium` — invisible on the real-time dashboard.
+
+**Decision:** Increase `ml_flow_anomaly` component weight from 1 to 2. This was approved after full cross-product classification analysis and live empirical verification (13/13 tests pass).
+
+**Classification impact (ml_flow_anomaly: 1 → 2):**
+
+| Scenario | Before | After | Change? |
+|----------|--------|-------|---------|
+| ML-only flow | LOW | **MEDIUM** | ← new: reaches dashboard |
+| ML-only graph | LOW | LOW | no (weight stays 1) |
+| Rule(low) only | LOW | LOW | no |
+| Rule(medium) only | MEDIUM | MEDIUM | no |
+| Rule(high) only | HIGH | HIGH | no |
+| ML flow + rule(low) | MEDIUM | MEDIUM | no |
+| ML flow + rule(medium) | MEDIUM | **HIGH** | escalates |
+| ML flow + rule(high) | HIGH | HIGH | no |
+| ML flow + ml_graph | MEDIUM | MEDIUM | no |
+
+**Noise analysis:** At production threshold (0.52), zero flow ML alerts fire on clean baseline traffic (validated: 65 windows, 0% FP, score range 0.4755–0.5091). The change produces zero additional dashboard noise under normal conditions. It only activates when the model is genuinely confident (score ≥ 0.52), which requires attack-like traffic patterns.
+
+**Graph model intentionally left at weight=1:** graph_model's FP validation against a real 24h baseline is still a tracked Phase 8 follow-up. Without that validation, we don't have the same confidence in graph_model's calibration that we now have in flow_model. graph_model weight will be revisited after its FP validation is complete.
+
+**Config change:** `config/risk_policy.yaml` line 10: `ml_flow_anomaly: 1` → `ml_flow_anomaly: 2`
+
+**Tests updated:** `tests/test_risk_scoring.py` — placeholder test replaced with `test_ml_flow_above_threshold_scores_medium` and new `test_ml_flow_plus_medium_rule_escalates_to_high`.
+
 ---
 
 ## 12. Parallelization Guide

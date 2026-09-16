@@ -46,10 +46,15 @@ def test_ml_flow_below_threshold_contributes_nothing(scorer: RiskScorer) -> None
     assert scorer.score([{"kind": "ml_flow", "score": 0.1}]) is Severity.LOW
 
 
-def test_ml_flow_above_threshold_logs_a_low_placeholder_signal(scorer: RiskScorer) -> None:
-    # Phase 4 placeholder: a lone ML anomaly contributes its component weight
-    # (1), below medium_min (2) — scorer is extended when ML lands.
-    assert scorer.score([{"kind": "ml_flow", "score": 0.9}]) is Severity.LOW
+def test_ml_flow_above_threshold_scores_medium(scorer: RiskScorer) -> None:
+    # ml_flow_anomaly weight=2 matches medium_min=2, so a confident ML-only
+    # detection surfaces as Medium and reaches the real-time dashboard.
+    assert scorer.score([{"kind": "ml_flow", "score": 0.9}]) is Severity.MEDIUM
+
+
+def test_ml_flow_plus_medium_rule_escalates_to_high(scorer: RiskScorer) -> None:
+    # Combined ML + rule confirmation: ml(2) + rule_medium(2) = 4 >= high_min(4).
+    assert scorer.score([rule("medium"), {"kind": "ml_flow", "score": 0.9}]) is Severity.HIGH
 
 
 def test_ml_graph_above_threshold_combines_with_rule(scorer: RiskScorer) -> None:

@@ -1,20 +1,21 @@
 """Risk/severity scoring (FR-6) — combines per-event detections into one label.
 
-Every detection (rule hit, and later in Phase 4 an ML anomaly score) is a
-*signal* on the same event.  The scorer converts each signal into a numeric
-contribution using the config-driven policy in ``config/risk_policy.yaml`` and
-maps the aggregate onto a single Low/Medium/High severity label per event:
+Every detection (rule hit, ML anomaly score) is a *signal* on the same event.
+The scorer converts each signal into a numeric contribution using the
+config-driven policy in ``config/risk_policy.yaml`` and maps the aggregate
+onto a single Low/Medium/High severity label per event:
 
 * a rule hit contributes ``severity_levels[severity] * rule_hit``
-* an ML signal contributes its component weight when its anomaly score crosses
-  the configured threshold (Phase 4 integration; scorer is wired to accept it)
-* ``hard_height_override: true`` forces High when any single signal is High,
-  so a lone high-severity detection can never be downgraded by summation
+* an ML flow signal contributes ``ml_flow_anomaly`` (2) when its anomaly score
+  crosses ``flow_model_anomaly_threshold`` — a confident ML-only detection
+  surfaces as Medium and reaches the real-time dashboard
+* an ML graph signal contributes ``ml_graph_anomaly`` (1) when its score
+  crosses ``graph_new_edge_threshold`` — still LOW until graph FP validation
+  (Phase 8 follow-up) is complete
+* ``hard_height_override: true`` forces High when any single rule signal is
+  High, so a lone high-severity rule hit can never be downgraded by summation
 * otherwise the total is tiered: ``high_min`` -> High, ``medium_min`` -> Medium,
   below that Low
-
-ML contributions are only consulted in Phase 4; the policy keys exist now so
-the scoring shape is agreed (PHASES.doc.md §6) and stable.
 """
 
 from __future__ import annotations

@@ -7,7 +7,7 @@ risk_scoring:
     high: 3
   component_weights:
     rule_hit: 1
-    ml_flow_anomaly: 1
+    ml_flow_anomaly: 2
     ml_graph_anomaly: 1
   severity_tiers:
     low_min: 0

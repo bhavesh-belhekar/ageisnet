@@ -26,6 +26,7 @@ Usage (called asynchronously after alert persist)::
 from __future__ import annotations
 
 import logging
+import os
 import pickle
 import time
 import traceback
@@ -37,8 +38,8 @@ import numpy as np
 logger = logging.getLogger("shap_explainer")
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_ARTIFACT_DIR = Path(__file__).resolve().parents[2] / "data" / "model_artifacts"
-_ARTIFACT_PATH = _ARTIFACT_DIR / "flow_model_v2.pkl"
+_ARTIFACT_DIR = Path(os.environ.get("MODEL_ARTIFACT_DIR", str(_REPO_ROOT / "data" / "model_artifacts")))
+_ARTIFACT_PATH = Path(_ARTIFACT_DIR) / "flow_model_v2.pkl"
 
 _tree_explainer: Any = None
 _model_bundle: dict | None = None

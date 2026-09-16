@@ -44,6 +44,43 @@ MAX_DELIVERIES = 5
 _engine: RuleEngine | None = None
 _scorer: RiskScorer | None = None
 
+# Bound concurrent SHAP computations to prevent event-loop overload (FR-11.2)
+_SHAP_SEMAPHORE = asyncio.Semaphore(5)
+_shap_queue: asyncio.Queue | None = None
+_shap_workers_started = False
+
+
+def _get_shap_queue() -> asyncio.Queue:
+    """Return the singleton SHAP work queue (created on first call)."""
+    global _shap_queue
+    if _shap_queue is None:
+        _shap_queue = asyncio.Queue(maxsize=100)
+    return _shap_queue
+
+
+async def _shap_worker(pool, hub):
+    """Background worker that processes SHAP computation requests."""
+    queue = _get_shap_queue()
+    while True:
+        item = await queue.get()
+        try:
+            await _compute_shap_inline(pool, hub, **item)
+        except Exception:
+            logger.error("SHAP worker failed\n%s", traceback.format_exc())
+        finally:
+            queue.task_done()
+
+
+def _ensure_shap_workers(pool, hub):
+    """Start SHAP worker tasks if not already running."""
+    global _shap_workers_started
+    if _shap_workers_started:
+        return
+    _shap_workers_started = True
+    for i in range(3):
+        asyncio.create_task(_shap_worker(pool, hub))
+        logger.info("SHAP worker %d started", i)
+
 
 # --- Lazy imports for ML (avoids circular / heavy imports at module load) ---
 
@@ -69,7 +106,7 @@ def _get_shap_explainer():
     return shap_explainer
 
 
-async def _compute_shap_async(
+async def _compute_shap_inline(
     pool: asyncpg.Pool,
     hub: AlertHub | None,
     alert_id: int,
@@ -82,43 +119,43 @@ async def _compute_shap_async(
 ) -> None:
     """Compute SHAP/rule-based explanation and attach to the alert.
 
-    Runs as a fire-and-forget asyncio task after the alert has already
-    been persisted and pushed to the dashboard (FR-11.2).
+    Runs inside a bounded worker (FR-11.2).
     """
     try:
         explainer = _get_shap_explainer()
 
-        if signal.get("kind") == "ml_flow" and features is not None and scaled_vector is not None:
-            from app.ml_engine.flow_model.features import FEATURE_ORDER
+        async with _SHAP_SEMAPHORE:
+            if signal.get("kind") == "ml_flow" and features is not None and scaled_vector is not None:
+                from app.ml_engine.flow_model.features import FEATURE_ORDER
 
-            explanation = await explainer.explain_flow(
-                alert_id, FEATURE_ORDER, features, scaled_vector,
-            )
-        elif signal.get("kind") == "ml_graph" and detail is not None:
-            explanation = await explainer.explain_graph(alert_id, detail, baseline_size)
-        else:
-            logger.debug("no explainer path for signal kind=%s — skipping", signal.get("kind"))
-            return
+                explanation = await explainer.explain_flow(
+                    alert_id, FEATURE_ORDER, features, scaled_vector,
+                )
+            elif signal.get("kind") == "ml_graph" and detail is not None:
+                explanation = await explainer.explain_graph(alert_id, detail, baseline_size)
+            else:
+                logger.debug("no explainer path for signal kind=%s — skipping", signal.get("kind"))
+                return
 
-        if explanation is None:
-            logger.warning("explanation returned None for alert %d — skipping DB update", alert_id)
-            return
+            if explanation is None:
+                logger.warning("explanation returned None for alert %d — skipping DB update", alert_id)
+                return
 
-        success = await update_alert_shap(pool, alert_id, explanation)
-        if not success:
-            return
+            success = await update_alert_shap(pool, alert_id, explanation)
+            if not success:
+                return
 
-        # Push WebSocket follow-up so the dashboard can populate the SHAP panel
-        if hub is not None:
-            try:
-                await hub.publish({
-                    "alert_id": alert_id,
-                    "event_id": event.event_id,
-                    "shap_explanation": explanation,
-                    "update_type": "shap_attachment",
-                })
-            except Exception:
-                logger.warning("WebSocket follow-up push failed for alert %d", alert_id)
+            # Push WebSocket follow-up so the dashboard can populate the SHAP panel
+            if hub is not None:
+                try:
+                    await hub.publish({
+                        "alert_id": alert_id,
+                        "event_id": event.event_id,
+                        "shap_explanation": explanation,
+                        "update_type": "shap_attachment",
+                    })
+                except Exception:
+                    logger.warning("WebSocket follow-up push failed for alert %d", alert_id)
 
     except Exception:
         logger.error(
@@ -126,6 +163,39 @@ async def _compute_shap_async(
             alert_id,
             traceback.format_exc(),
         )
+
+
+async def _compute_shap_async(
+    pool: asyncpg.Pool,
+    hub: AlertHub | None,
+    alert_id: int,
+    event: Event,
+    signal: dict,
+    features: dict | None = None,
+    scaled_vector: list[float] | None = None,
+    detail: dict | None = None,
+    baseline_size: int = 0,
+) -> None:
+    """Enqueue SHAP computation for bounded async processing (FR-11.2).
+
+    Instead of fire-and-forget create_task (which overwhelms the event loop
+    at high alert rates), this enqueues work items for a fixed pool of
+    background workers.
+    """
+    queue = _get_shap_queue()
+    _ensure_shap_workers(pool, hub)
+    try:
+        queue.put_nowait({
+            "alert_id": alert_id,
+            "event": event,
+            "signal": signal,
+            "features": features,
+            "scaled_vector": scaled_vector,
+            "detail": detail,
+            "baseline_size": baseline_size,
+        })
+    except asyncio.QueueFull:
+        logger.warning("SHAP queue full — dropping SHAP for alert %d", alert_id)
 
 
 def _get_engine() -> RuleEngine:
