@@ -394,6 +394,22 @@ and the frozen schema are unchanged (see `PRD.md` Section 9).
 
 **Tests updated:** `tests/test_risk_scoring.py` — placeholder test replaced with `test_ml_flow_above_threshold_scores_medium` and new `test_ml_flow_plus_medium_rule_escalates_to_high`.
 
+### Phase 8 Checkpoint (2026-09-16) — Graph-Model Ephemeral Port Bugfix
+
+**Source:** Real bug found during hands-on post-Phase-8 testing — not caught during the formal Phase 8 process. The system was running, the dashboard was live, and the user noticed ~19,000 low-severity graph alerts flooding the database. This surfaced from actually using the finished system, not from a test suite.
+
+**Root cause:** Server-side eBPF events carry the client's random ephemeral port as `dst_port` (e.g., postgres seeing a client connect from 58230). The graph_model had no filter for this — every server-side event was treated as a distinct `(src, dst, port)` edge, generating a "new edge" alert. RULE-003 already had `EPHEMERAL_PORT_MIN = 32768` to handle this exact pattern for port-scan detection; the graph_model lacked the equivalent filter.
+
+**Evidence:** 19,232 graph alerts in the database, all with ephemeral dst_ports (32784, 32804, 32810, 32828, etc.). Zero "new edge" alerts after the fix. Dashboard API response went from timeout to 65ms.
+
+**Fix:** Added `EPHEMERAL_PORT_MIN = 32768` to `graph_model/infer.py`, returning `None` immediately when `dst_port >= EPHEMERAL_PORT_MIN`. Matches the existing filter in `rule_engine/engine.py:149`.
+
+**Regression tests:** 4 new tests in `tests/test_ml_engine.py`:
+1. `test_ephemeral_port_constant_matches_rule_engine` — confirms both modules use the same constant
+2. `test_ephemeral_dst_port_would_be_skipped` — verifies the filter condition fires for ephemeral ports
+3. `test_service_port_not_filtered` — verifies service ports pass the filter
+4. `test_same_container_repeated_connections_dont_multiply_alerts` — verifies `GraphDiffDetector.record_edge` prevents re-flagging
+
 ---
 
 ## 12. Parallelization Guide

@@ -23,6 +23,12 @@ from app.ml_engine.graph_model.graph_diff import GraphDiffDetector
 
 logger = logging.getLogger("graph_model.infer")
 
+# Server-side event mirrors carry the client's ephemeral port as dst_port
+# (e.g., postgres seeing a client connect from 58230).  These change every
+# connection and must not be treated as distinct edges.  Matches the
+# EPHEMERAL_PORT_MIN filter used by RULE-003 in rule_engine/engine.py.
+EPHEMERAL_PORT_MIN = 32768
+
 _detector: GraphDiffDetector | None = None
 _init_failed = False
 
@@ -83,6 +89,12 @@ async def score_graph_event(event) -> dict | None:
         src = event.container_id
         dst = event.dst_ip  # proxy for destination container
         port = event.dst_port
+
+        # Skip server-side event mirrors: dst_port is the client's ephemeral
+        # port, not a real service port.  These change every connection and
+        # would generate false "new edge" alerts.
+        if port >= EPHEMERAL_PORT_MIN:
+            return None
 
         result = detector.check_edge(src, dst, port)
         if result is not None:
