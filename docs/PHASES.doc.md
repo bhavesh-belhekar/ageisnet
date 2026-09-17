@@ -410,6 +410,63 @@ and the frozen schema are unchanged (see `PRD.md` Section 9).
 3. `test_service_port_not_filtered` — verifies service ports pass the filter
 4. `test_same_container_repeated_connections_dont_multiply_alerts` — verifies `GraphDiffDetector.record_edge` prevents re-flagging
 
+### Phase 8 Follow-up (2026-09-17) — flow_model Training Baseline Gap
+
+**Source:** Investigated why flow_model never fires on the exfiltration attack scenario. Traced through feature extraction, scaler statistics, and model decision boundary with a dedicated ml-test-sim container (non-blacklisted IP) to eliminate rule-engine masking as a confound.
+
+**Root cause:** The flow_model's training baseline was collected from demo-app internal traffic, which has fundamentally different characteristics than real external exfiltration:
+
+| Feature | Training Mean | Exfil Value | Scaled (σ from mean) |
+|---|---|---|---|
+| total_bytes_sent | 10,633 | 1,000,071 | +93.5 |
+| total_bytes_received | 8,070 | 4,620 | -0.49 |
+| connection_count | 51.5 | 20 | -0.89 |
+| unique_dst_ports | 33.5 | 1 | -1.26 |
+| **unique_dst_ips** | **1.5** | **8** | **+13.0** |
+| window_seconds | 153.9 | 1 | -1.78 |
+
+The model has near-zero exposure to multi-IP external destinations (`unique_dst_ips` training mean=1.5, std=0.5). The exfil attack hits 8 IPs (httpbin.org DNS round-robins across AWS), producing a +13σ outlier on that feature. Combined with low `connection_count` and `unique_dst_ports` (below training means), the Isolation Forest does not flag the pattern as anomalous despite 216.5:1 byte asymmetry.
+
+**Evidence (live run, 2026-09-17):**
+- ml-test-sim container (IP 172.18.0.9, NOT in threat-intel list)
+- 20 POST requests to httpbin.org/status/200, 50KB each = 1MB total
+- Features: `{total_bytes_sent: 1000071, total_bytes_received: 4620, connection_count: 20, unique_dst_ports: 1, unique_dst_ips: 8, window_seconds: 1.0}`
+- 126 flow_model scores produced, range 0.484–0.503, **max 0.5033** (threshold=0.52)
+- **Zero alerts generated** — no rule alerts (non-blacklisted IP), no ML alerts (below threshold)
+
+**Impact:** flow_model cannot reliably detect external data exfiltration in its current state. This also means:
+1. **False negatives** on legitimate exfil-shaped attacks (high send, low receive, multi-IP destination)
+2. **Potential false positives** on legitimate multi-IP external services (CDNs, load-balanced APIs) if the model were retrained naively without accounting for this pattern
+3. The only exfiltration detection currently working is RULE-001 (known-bad IP), which requires the attacker's IP to already be in the threat-intel list
+
+**Tracked for Phase 8 (or dedicated retraining session):**
+Retrain flow_model with a broader external traffic baseline that includes:
+- Multi-IP destinations (CDNs, cloud APIs)
+- Varied connection counts and port diversity
+- Both balanced (request/response) and asymmetric (exfil-like) byte patterns
+- Full re-validation: FP rate on clean baseline, detection rate on injected exfil patterns
+- Consider whether `unique_dst_ips` should be excluded from capping (like `unique_dst_ips` already is per `risk_policy.yaml`) or whether the feature needs reconsideration for external traffic
+
+**Not blocking:** RULE-001 + graph_model continue to cover known-bad-IP and lateral-movement detections respectively. flow_model is the gap for novel external exfiltration.
+
+### Phase 8 Hardening (2026-09-16/17) — Post-Completion Bug Fixes
+
+**Source:** Real bugs found through hands-on use after Phase 8 was marked complete. These surfaced from actually using the finished system — not from any formal test suite. The system was running, the dashboard was live, and the user was exercising attack scenarios end-to-end.
+
+**Fix 1 — Attacker-sim networking bug (`scripts/run_attack_scenario.sh`):**
+`docker compose run --rm attacker-sim` was failing because the container had no network access. Changed to `docker compose exec attacker-sim /attacks/entrypoint.sh` which runs against the already-running container with proper networking.
+
+**Fix 2 — graph_model ephemeral-port spam (commit `7bb8522`):**
+Server-side eBPF events carry the client's random ephemeral port as `dst_port`. The graph_model had no filter — every server-side event was treated as a distinct edge, generating ~19,000 spam alerts. Added `EPHEMERAL_PORT_MIN = 32768` to `graph_model/infer.py`, matching the existing filter in `rule_engine/engine.py:149`. Dashboard API went from timeout to 65ms. 4 new regression tests added.
+
+**Fix 3 — Missing CORS middleware (commit `89e0023`):**
+Browser CORS preflight (OPTIONS) requests to `/api/alerts` were returning 405 because no `CORSMiddleware` was registered on the FastAPI app. `curl` worked because it skips OPTIONS preflight. Fixed by adding `CORSMiddleware` with `allow_origins=["http://localhost:5173"]`, `allow_methods=["*"]`, `allow_headers=["*"]`.
+
+**Fix 4 — NetworkGraph node-not-found crash (commit `89e0023`):**
+`react-force-graph-2d` crashed when links referenced IPs (from beaconing/SSH test traffic) that weren't in the `MOCK_NODES` list. Fixed by dynamically building the node set: any ID referenced in `MOCK_LINKS` but missing from `MOCK_NODES` is automatically added as a gray node before `graphData` is assembled.
+
+**Honest assessment:** These were real issues that would have been caught by more thorough integration testing, but they surfaced through actual use after Phase 8 was declared complete. The formal Phase 8 process validated metrics against defined targets; hands-on use revealed edge cases that formal testing missed.
+
 ---
 
 ## 12. Parallelization Guide

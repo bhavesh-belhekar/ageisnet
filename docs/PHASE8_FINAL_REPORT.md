@@ -276,4 +276,27 @@ Three additional tracked follow-ups remain: Neo4j reconciliation on reconnect (S
 
 ---
 
+## Addendum — Post-Completion Bug Fixes (2026-09-16/17)
+
+**Source:** Real bugs found through hands-on use after Phase 8 was marked complete. The system was running, the dashboard was live, and the user was exercising attack scenarios end-to-end. These issues were not caught during the formal Phase 8 testing process.
+
+**Fix 1 — Attacker-sim networking bug:**
+`docker compose run --rm attacker-sim` was failing because the container had no network access. Changed to `docker compose exec attacker-sim /attacks/entrypoint.sh` which runs against the already-running container with proper networking.
+
+**Fix 2 — graph_model ephemeral-port spam (~19,000 false alerts):**
+Server-side eBPF events carry the client's random ephemeral port as `dst_port`. The graph_model had no filter — every server-side event was treated as a distinct edge, generating ~19,000 spam alerts. Added `EPHEMERAL_PORT_MIN = 32768` to `graph_model/infer.py`. Dashboard API went from timeout to 65ms. 4 new regression tests added.
+
+**Fix 3 — Missing CORS middleware (dashboard couldn't load alerts):**
+Browser CORS preflight (OPTIONS) requests to `/api/alerts` were returning 405 because no `CORSMiddleware` was registered on the FastAPI app. `curl` worked because it skips OPTIONS preflight. Fixed by adding `CORSMiddleware`.
+
+**Fix 4 — NetworkGraph node-not-found crash:**
+`react-force-graph-2d` crashed when links referenced IPs (from beaconing/SSH test traffic) that weren't in the `MOCK_NODES` list. Fixed by dynamically building the node set.
+
+**Finding 5 — flow_model training baseline gap (substantive ML limitation):**
+flow_model never fires on exfiltration attacks — even with genuine 216.5:1 byte asymmetry. Investigated by building a dedicated `ml-test-sim` container (non-blacklisted IP) to eliminate RULE-001 masking as a confound. Root cause: the model's training baseline was collected from demo-app internal traffic with `unique_dst_ips` mean=1.5 (std=0.5). The exfil attack hits 8 IPs (httpbin.org DNS round-robin), producing a +13σ outlier on that feature — far outside the training distribution. Combined with low `connection_count` (20 vs training mean 51.5) and `unique_dst_ports` (1 vs 33.5), the Isolation Forest does not flag the pattern as anomalous despite extreme byte asymmetry. Live evidence: 126 flow_model scores, range 0.484–0.503, max 0.5033 (threshold 0.52). Zero alerts generated. This is not an infrastructure bug — it is a genuine gap in the model's training data that produces false negatives on novel external exfiltration. Full analysis in `docs/PHASES.doc.md` under "Phase 8 Follow-up (2026-09-17) — flow_model Training Baseline Gap."
+
+**Honest assessment:** Fixes 1–4 are infrastructure and usability issues that would have been caught by more thorough integration testing. Finding 5 is the most substantive discovery — a real ML limitation where the model's training distribution does not cover the attack pattern, producing silent false negatives. All five were found through hands-on use after Phase 8 was declared complete. None of these affect the validity of the Phase 8 metrics as measured, but Finding 5 means the exfiltration detection metric (Section 2.1: "2/2 attack types correctly detected") has a narrower scope than it appears — it only works when the attacker's IP is already in the threat-intel list.
+
+---
+
 *End of Phase 8 Final Report*

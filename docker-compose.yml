@@ -195,3 +195,11 @@ services:
     profiles:
       - attack
     restart: "no"
+
+  ml-test-sim:
+    build: ./ml-test-sim
+    stdin_open: true
+    tty: true
+    profiles:
+      - attack
+    restart: "no"

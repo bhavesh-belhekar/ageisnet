@@ -32,12 +32,12 @@ case "$1" in
         exit 0
         ;;
     --list|-l)
-        docker compose run --rm attacker-sim --list
+        docker compose exec attacker-sim /attacks/entrypoint.sh --list
         ;;
     --all|-a)
-        docker compose run --rm attacker-sim --all
+        docker compose exec attacker-sim /attacks/entrypoint.sh --all
         ;;
     *)
-        docker compose run --rm attacker-sim "$1"
+        docker compose exec attacker-sim /attacks/entrypoint.sh "$1"
         ;;
 esac

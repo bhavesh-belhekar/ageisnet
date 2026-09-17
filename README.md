@@ -94,6 +94,11 @@ http://localhost:5173
 The dashboard loads with an empty alert feed and a live container
 communication graph.
 
+**Note:** On a completely fresh/empty database, the Alert Feed will
+legitimately show "0 alerts" until traffic is generated (Step 6) and
+an attack is triggered (Step 7). This is expected behavior — the
+dashboard is live and connected; it just has no data yet.
+
 ### 6. Generate traffic so alerts appear
 
 The dashboard is empty until traffic flows. Open a second terminal and
@@ -142,6 +147,50 @@ Or run them all:
 ```bash
 bash scripts/run_attack_scenario.sh --all
 ```
+
+## Troubleshooting
+
+### Alert Feed shows "0 alerts" on first run
+
+This is expected. The Alert Feed only populates after traffic is
+generated (Step 6) and an attack is triggered (Step 7). The dashboard
+is live and connected — it just has no data yet.
+
+### demo-db fails health check with "timescaleb extension not available"
+
+On some first boots, `demo-db` logs a cosmetic error about the
+TimescaleDB extension not being available. This is harmless — demo-db
+doesn't actually need TimescaleDB. Postgres recovers on its own after a
+few seconds. If dependent services get stuck, restart:
+
+```bash
+docker compose up -d
+```
+
+### Backend becomes unresponsive (health check fails, WebSocket won't connect)
+
+If the backend's health check fails or the WebSocket stops connecting
+while background event-processing logs still look healthy, restart the
+backend:
+
+```bash
+docker compose restart backend
+```
+
+This resolves transient issues where the backend's internal state gets
+stuck while the event-processing loop continues running.
+
+### ML-only detection testing (without rule-engine interference)
+
+For testing ML model detection in isolation (without RULE-001 masking),
+use the `ml-test-sim` container. It has a non-blacklisted IP, so alerts
+can only come from the ML pipeline, not the rule engine:
+
+```bash
+docker compose --profile attack run --rm ml-test-sim exfiltration
+```
+
+This requires the `attack` profile to be active.
 
 ## Stopping the Stack
 
