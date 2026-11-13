@@ -182,3 +182,35 @@ export function wsAlertsUrl(): string {
   const base = BASE_URL.replace(/^http/, "ws");
   return `${base}/ws/alerts`;
 }
+
+// ------------------------------------------------------------------
+// Graph API types (GET /api/graph)
+// ------------------------------------------------------------------
+
+/** A container node in the communication graph. */
+export interface GraphNode {
+  id: string;
+  label: string;
+}
+
+/** A directed communication edge between two containers. */
+export interface GraphLink {
+  source: string;
+  target: string;
+  port: number;
+  protocol: string;
+  is_anomalous: boolean;
+  first_seen: number | null;
+  last_seen: number | null;
+}
+
+/** Full graph payload returned by GET /api/graph. */
+export interface GraphData {
+  nodes: GraphNode[];
+  links: GraphLink[];
+}
+
+/** Fetch the live container communication graph. */
+export function getGraph(): Promise<GraphData> {
+  return request<GraphData>("/api/graph");
+}

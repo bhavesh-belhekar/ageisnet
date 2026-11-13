@@ -7,6 +7,7 @@ and persists the model as ``data/model_artifacts/flow_model_v2.pkl``.
 The saved artifact is a dict containing:
 
     - ``model``: fitted ``sklearn.ensemble.IsolationForest``
+    - ``scaler``: fitted ``sklearn.preprocessing.StandardScaler``
     - ``feature_names``: ordered list of feature column names
     - ``cap_values``: per-feature cap thresholds applied during training
       (features in ``cap_exclude`` are left uncapped; their cap_value is
@@ -40,6 +41,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -53,13 +55,19 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(_REPO_ROOT / "backend"))
 
 from app.config.settings import get_settings  # noqa: E402
-from app.ml_engine.flow_model.features import FEATURE_ORDER  # noqa: E402
+from app.ml_engine.flow_model.features import FEATURE_ORDER, preprocess_features  # noqa: E402
 
 logger = logging.getLogger("flow_model.train")
 
 _CONFIG_PATH = _REPO_ROOT / "backend" / "app" / "config" / "risk_policy.yaml"
-_BASELINE_DIR = _REPO_ROOT / "data" / "training_baselines"
-_ARTIFACT_DIR = _REPO_ROOT / "data" / "model_artifacts"
+
+# Support explicit container and environment overrides, falling back to repository paths
+_BASELINE_DIR = Path(
+    os.environ.get("TRAINING_BASELINE_DIR", str(_REPO_ROOT / "data" / "training_baselines"))
+)
+_ARTIFACT_DIR = Path(
+    os.environ.get("MODEL_ARTIFACT_DIR", str(_REPO_ROOT / "data" / "model_artifacts"))
+)
 
 TRAIN_CSV = _BASELINE_DIR / "normal_baseline_train.csv"
 VAL_CSV = _BASELINE_DIR / "normal_baseline_val.csv"
@@ -177,8 +185,14 @@ def train() -> dict:
     val_count = 0
     if VAL_CSV.exists():
         val_matrix = _read_csv(VAL_CSV)
-        val_capped = np.minimum(val_matrix, cap_values)
-        val_scaled = scaler.transform(val_capped)
+        # Use consistent preprocessing matching inference pipeline
+        _, val_scaled = preprocess_features(
+            val_matrix,
+            scaler=scaler,
+            feature_names=FEATURE_ORDER,
+            cap_values=dict(zip(FEATURE_ORDER, cap_values.tolist())),
+            apply_caps=False,
+        )
         predictions = model.predict(val_scaled)
         # Isolation Forest: -1 = anomaly, 1 = normal
         val_count = len(predictions)

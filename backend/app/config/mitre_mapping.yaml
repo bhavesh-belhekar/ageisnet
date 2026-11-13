@@ -9,8 +9,11 @@ detection_type_to_technique:
   ml:
     flow_beaconing: T1071.001
     flow_exfiltration_spike: T1041
-    graph_lateral_movement: T1021.001
+    graph_lateral_movement: T1021
     graph_unseen_edge: T1021
+    graph_sensitive_port: null        # Insufficient evidence on connection alone (no T1078)
+    graph_lateral_path: T1021         # Remote Services — multi-hop remote connection
+    graph_internal_recon: T1046       # Network Service Discovery — internal port scanning
   fallback:
     ml_flow_anomaly: T1071
     ml_graph_anomaly: T1021

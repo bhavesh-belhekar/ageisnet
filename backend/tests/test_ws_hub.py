@@ -71,3 +71,38 @@ async def test_multiple_subscribers_all_receive(hub: AlertHub) -> None:
     assert got1 == got2 == ALERT.copy()
     hub.unsubscribe(q1)
     hub.unsubscribe(q2)
+
+
+# ---------------------------------------------------------------------------
+# Stage 3A: SHAP attachment bypass (fix for KeyError: 'severity')
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_shap_attachment_bypasses_severity_filter(hub: AlertHub) -> None:
+    """SHAP follow-ups must reach subscribers regardless of the severity filter."""
+    queue = hub.subscribe()
+    shap_msg = {
+        "alert_id": 99,
+        "event_id": 5,
+        "shap_explanation": {"explanation_type": "shap"},
+        "update_type": "shap_attachment",
+    }
+    await hub.publish(shap_msg)
+    got = await asyncio.wait_for(queue.get(), timeout=1)
+    assert got["update_type"] == "shap_attachment"
+    assert got["alert_id"] == 99
+    hub.unsubscribe(queue)
+
+
+@pytest.mark.asyncio
+async def test_shap_attachment_no_keyerror_without_severity(hub: AlertHub) -> None:
+    """Publishing a SHAP attachment without a 'severity' key must not raise."""
+    queue = hub.subscribe()
+    # Must not raise KeyError even though 'severity' is absent
+    await hub.publish(
+        {"alert_id": 1, "update_type": "shap_attachment", "shap_explanation": None}
+    )
+    got = await asyncio.wait_for(queue.get(), timeout=1)
+    assert got["alert_id"] == 1
+    hub.unsubscribe(queue)

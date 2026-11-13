@@ -160,25 +160,44 @@ async def explain_graph(
 
     Args:
         alert_id: The alert's DB primary key (for logging).
-        detail: The anomaly detail dict from ``GraphDiffDetector.check_edge()``.
+        detail: The anomaly detail dict from ``GraphDiffDetector.check_edge()``
+            or ``LateralMovementDetector``.
         baseline_size: Number of edges in the baseline window.
 
     Returns:
         JSON-serializable explanation dict.
     """
-    explanation = {
+    trigger = detail.get("trigger")
+    if not trigger:
+        if detail.get("kind") == "graph_sensitive_port" or "service" in detail:
+            trigger = "sensitive_port"
+        elif detail.get("kind") == "graph_lateral_path" or "path" in detail:
+            trigger = "lateral_path"
+        elif detail.get("kind") == "graph_internal_recon" or "port_count" in detail:
+            trigger = "internal_recon"
+        else:
+            trigger = "new_edge"
+
+    explanation: dict[str, Any] = {
         "explanation_type": "rule_based",
-        "trigger": "new_edge",
+        "trigger": trigger,
         "src_container": detail.get("src", "unknown"),
         "dst_container": detail.get("dst", "unknown"),
         "port": detail.get("port", 0),
         "reason": detail.get("reason", "edge not in baseline"),
         "baseline_edges_seen": baseline_size,
     }
+    if trigger == "sensitive_port":
+        explanation["service"] = detail.get("service", "unknown")
+    elif trigger == "lateral_path":
+        explanation["path"] = detail.get("path", [])
+    elif trigger == "internal_recon":
+        explanation["port_count"] = detail.get("port_count", 0)
 
     logger.info(
-        "graph explanation built for alert %d: %s→%s:%d",
+        "graph explanation built for alert %d: trigger=%s %s→%s:%d",
         alert_id,
+        trigger,
         explanation["src_container"],
         explanation["dst_container"],
         explanation["port"],

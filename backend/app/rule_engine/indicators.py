@@ -40,11 +40,13 @@ def _load_threat_intel() -> set[str]:
 
 def _resolve_container_ips(name: str) -> set[str]:
     """Resolve a service/hostname to its container IPs (docker network DNS)."""
+    if not name:
+        return set()
     try:
-        results = socket.getaddrinfo(name, 5432, type=socket.SOCK_STREAM)
+        results = socket.getaddrinfo(name, 0, type=socket.SOCK_STREAM)
     except OSError as exc:
         logger.warning(
-            "could not resolve restricted container %r (%s) — " "rule will not fire against it",
+            "could not resolve container %r (%s) — rule will not match against it",
             name,
             exc,
         )
@@ -74,12 +76,22 @@ def _resolve_restricted_connections() -> list[dict]:
     rules = _load_policy().get("rules", {}).get("restricted_connections", [])
     resolved = []
     for rule in rules:
+        allowed_sources = rule.get("allowed_sources", [])
+        allowed_ips: set[str] = set()
+        allowed_ids: set[str] = set()
+        for src in allowed_sources:
+            ips = _resolve_container_ips(src)
+            if ips:
+                allowed_ips.update(ips)
+            allowed_ids.add(src)
         resolved.append(
             {
                 "dst_container": rule.get("dst_container"),
                 "dst_port": rule.get("dst_port"),
                 "dst_ips": _resolve_container_ips(rule.get("dst_container", "")),
-                "allowed_sources": set(rule.get("allowed_sources", [])),
+                "allowed_sources": set(allowed_sources),
+                "allowed_ips": allowed_ips,
+                "allowed_ids": allowed_ids,
                 "description": rule.get("description", ""),
             }
         )

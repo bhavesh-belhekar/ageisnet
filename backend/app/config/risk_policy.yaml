@@ -9,6 +9,9 @@ risk_scoring:
     rule_hit: 1
     ml_flow_anomaly: 2
     ml_graph_anomaly: 1
+    graph_sensitive_port_weight: 2   # new edge to a sensitive service (DB, SSH…)
+    graph_lateral_path_weight: 3     # two-hop lateral movement chain
+    graph_internal_recon_weight: 2   # distinct port probing / recon across internal nodes
   severity_tiers:
     low_min: 0
     medium_min: 2
@@ -26,6 +29,9 @@ windows:
 ml_thresholds:
   flow_model_anomaly_threshold: 0.52
   graph_new_edge_threshold: 1.0
+  graph_sensitive_port_threshold: 1.0   # must equal score (always 1.0)
+  graph_lateral_path_threshold: 1.0
+  graph_internal_recon_threshold: 1.0
 
 flow_model:
   cap_percentile: 0.99         # cap continuous features at 99th percentile
@@ -51,7 +57,7 @@ rules:
     - dst_container: "demo-db"
       dst_port: 5432
       allowed_sources:
-        - "8f067cabaefa"   # demo-api (12-char docker container ID)
+        - "demo-api"   # dynamic service resolution via DNS
       description: "Only demo-api may reach demo-db:5432"
 
   port_scan_threshold: 5

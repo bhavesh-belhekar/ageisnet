@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.alerts import router as alerts_router
 from app.api.events import router as events_router
+from app.api.graph import router as graph_router
 from app.api.health import router as health_router
 from app.config.settings import get_settings
 from app.consumers.event_consumer import consumer_loop
@@ -66,6 +67,7 @@ async def lifespan(app: FastAPI):
         password=settings.redis_password,
     )
     task = asyncio.create_task(consumer_loop(redis, pool, hub))
+    app.state.consumer_task = task
     yield
     task.cancel()
     try:
@@ -89,6 +91,7 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(alerts_router)
 app.include_router(events_router)
+app.include_router(graph_router)
 app.include_router(ws_router)
 
 

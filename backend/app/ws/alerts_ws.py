@@ -4,6 +4,10 @@
 persisted alert; every connected /ws/alerts subscriber receives it.  Only
 alerts at or above ``delivery.push_min_severity`` (medium by default) are
 pushed — Low alerts stay in the audit trail.
+
+SHAP follow-up messages (``update_type == "shap_attachment"``) bypass the
+severity filter: the parent alert has already passed the filter; the follow-up
+only attaches an explanation to an alert the subscriber already holds.
 """
 
 from __future__ import annotations
@@ -41,10 +45,16 @@ class AlertHub:
         self._subscribers.discard(queue)
 
     async def publish(self, alert: dict) -> None:
-        """Fan out one persisted alert dict, filtered by push severity (FR-7.2)."""
-        severity = Severity(alert["severity"])
-        if _SEVERITY_RANK[severity.value] < _SEVERITY_RANK[self._min_severity.value]:
-            return
+        """Fan out one persisted alert dict, filtered by push severity (FR-7.2).
+
+        SHAP follow-up messages (``update_type == "shap_attachment"``) do not
+        carry a ``severity`` field and must bypass the severity filter — they
+        update an alert that has already passed the filter and been pushed.
+        """
+        if alert.get("update_type") != "shap_attachment":
+            severity = Severity(alert["severity"])
+            if _SEVERITY_RANK[severity.value] < _SEVERITY_RANK[self._min_severity.value]:
+                return
         for queue in list(self._subscribers):
             queue.put_nowait(alert)
 

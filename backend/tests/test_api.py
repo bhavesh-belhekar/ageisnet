@@ -1,5 +1,6 @@
 import pytest
 from app.api import health as health_module
+from app.db import neo4j_client as neo4j_module
 from app.db import postgres as db_module
 from app.db.postgres import DatabaseUnavailableError
 from app.main import app
@@ -201,3 +202,77 @@ async def test_invalid_severity_filter_rejected(client) -> None:
         response = await c.get("/api/alerts", params={"severity": "critical"})
 
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Stage 3A: Graph API tests (FR-2.2 / ARCHITECTURE.md §3.6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_graph_returns_empty_when_no_edges(monkeypatch, client) -> None:
+    """GET /api/graph returns empty nodes and links when no edges exist."""
+
+    class FakeClient:
+        async def get_all_edges(self):
+            return {}
+
+    monkeypatch.setattr(neo4j_module, "_client", FakeClient())
+    async with client as c:
+        response = await c.get("/api/graph")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["nodes"] == []
+    assert body["links"] == []
+
+
+@pytest.mark.asyncio
+async def test_graph_returns_nodes_and_links(monkeypatch, client) -> None:
+    """GET /api/graph returns correct nodes and link structure from edge data."""
+
+    class FakeClient:
+        async def get_all_edges(self):
+            return {
+                ("aaa111", "bbb222", 5432): {
+                    "first_seen": 1000.0,
+                    "last_seen": 2000.0,
+                    "protocol": "tcp",
+                    "is_anomalous": True,
+                }
+            }
+
+    monkeypatch.setattr(neo4j_module, "_client", FakeClient())
+    async with client as c:
+        response = await c.get("/api/graph")
+
+    assert response.status_code == 200
+    body = response.json()
+    node_ids = [n["id"] for n in body["nodes"]]
+    assert "aaa111" in node_ids
+    assert "bbb222" in node_ids
+    assert len(body["links"]) == 1
+    link = body["links"][0]
+    assert link["source"] == "aaa111"
+    assert link["target"] == "bbb222"
+    assert link["port"] == 5432
+    assert link["is_anomalous"] is True
+    assert link["protocol"] == "tcp"
+
+
+@pytest.mark.asyncio
+async def test_graph_returns_empty_on_exception(monkeypatch, client) -> None:
+    """GET /api/graph returns empty graph (200) when graph client raises."""
+
+    class BrokenClient:
+        async def get_all_edges(self):
+            raise RuntimeError("neo4j down")
+
+    monkeypatch.setattr(neo4j_module, "_client", BrokenClient())
+    async with client as c:
+        response = await c.get("/api/graph")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["nodes"] == []
+    assert body["links"] == []

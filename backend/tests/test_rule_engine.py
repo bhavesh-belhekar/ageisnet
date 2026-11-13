@@ -174,12 +174,15 @@ class TestRulePortScan:
 class TestRuleRestrictedProtocol:
     @pytest.fixture(autouse=True)
     def _stub_dns(self, monkeypatch) -> None:
-        """demo-db is unresolvable from the test host; stub the resolver."""
-        monkeypatch.setattr(
-            indicators,
-            "_resolve_container_ips",
-            lambda name: {"172.18.0.4"} if name == "demo-db" else set(),
-        )
+        """demo-db and demo-api are unresolvable from the test host; stub the resolver."""
+        def _fake_resolve(name: str) -> set[str]:
+            if name == "demo-db":
+                return {"172.18.0.4"}
+            if name == "demo-api":
+                return {"172.18.0.7"}
+            return set()
+
+        monkeypatch.setattr(indicators, "_resolve_container_ips", _fake_resolve)
         indicators._resolve_restricted_connections.cache_clear()
 
     def test_fires_on_restricted_port(self) -> None:
@@ -201,9 +204,52 @@ class TestRuleRestrictedProtocol:
 
     def test_allowed_source_connecting_demo_db_is_quiet(self) -> None:
         eng = RuleEngine()
-        # demo-api is the whitelisted source for demo-db:5432
+        # demo-api is the whitelisted source for demo-db:5432 (resolved dynamically to 172.18.0.7)
         ev = _event(12, "bfa91286e27b", "172.18.0.7", "172.18.0.4", 5432)
         assert eng.evaluate(ev) == []
+
+    def test_allowed_source_with_different_container_id_is_quiet(self) -> None:
+        """Dynamic resolution ensures container recreation (new container_id) is NOT falsely flagged."""
+        eng = RuleEngine()
+        # Same demo-api IP, completely new random 12-char container ID
+        ev = _event(14, "deadbeef1234", "172.18.0.7", "172.18.0.4", 5432)
+        assert eng.evaluate(ev) == []
+
+    def test_disallowed_source_different_ip_is_flagged(self) -> None:
+        """An attacker using another IP is properly flagged even if attempting demo-db:5432."""
+        eng = RuleEngine()
+        ev = _event(15, "attacker9999", "172.18.0.99", "172.18.0.4", 5432)
+        alerts = eng.evaluate(ev)
+        assert len(alerts) == 1
+        assert alerts[0].mitre_technique_id == "T1571"
+        assert "lateral movement" in alerts[0].description
+
+    def test_allowed_source_by_container_id_fallback(self, monkeypatch) -> None:
+        """If a policy rule specifies an exact container ID, it is still respected as fallback."""
+        def _custom_rules() -> list[dict]:
+            return [
+                {
+                    "dst_container": "demo-db",
+                    "dst_port": 5432,
+                    "dst_ips": {"172.18.0.4"},
+                    "allowed_sources": {"explicit_cid_123"},
+                    "allowed_ips": set(),
+                    "allowed_ids": {"explicit_cid_123"},
+                    "description": "Test explicit container ID",
+                }
+            ]
+
+        monkeypatch.setattr(indicators, "get_restricted_connections", _custom_rules)
+        eng = RuleEngine()
+        # Allowed because container_id matches allowed_ids
+        ev_allowed = _event(16, "explicit_cid_123", "172.18.0.50", "172.18.0.4", 5432)
+        assert eng.evaluate(ev_allowed) == []
+
+        # Disallowed because neither IP nor container_id matches
+        ev_disallowed = _event(17, "other_cid_456", "172.18.0.50", "172.18.0.4", 5432)
+        alerts = eng.evaluate(ev_disallowed)
+        assert len(alerts) == 1
+        assert "lateral movement" in alerts[0].description
 
     def test_backend_to_metadata_postgres_is_not_lateral_movement(self) -> None:
         """Backend talking to its own metadata postgres (172.18.0.2) is not the

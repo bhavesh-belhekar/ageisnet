@@ -222,11 +222,73 @@ async def _ensure_group(redis: aioredis.Redis) -> None:
             raise
 
 
+async def _dead_letter_message(
+    redis: aioredis.Redis,
+    raw_id: bytes | str,
+    fields: dict | None,
+    deliveries: int,
+    consumer: str = CONSUMER,
+    reason: str = "max_deliveries_exceeded",
+) -> None:
+    """Write an entry to the dead-letter stream and ACK it from the main stream."""
+    event_payload = b"<payload-unavailable>"
+    if fields:
+        if b"event" in fields:
+            event_payload = fields[b"event"]
+        elif "event" in fields:
+            event_payload = fields["event"]
+    await redis.xadd(
+        DEAD_LETTER,
+        {
+            "event": event_payload,
+            "deliveries": deliveries,
+            "last_delivered_by": consumer,
+            "dead_letter_reason": reason,
+        },
+    )
+    await redis.xack(STREAM, GROUP, raw_id)
+    logger.critical(
+        "dead-lettered event stream_id=%s after %d deliveries (consumer=%s) — moving to %s (reason: %s)",
+        raw_id,
+        deliveries,
+        consumer,
+        DEAD_LETTER,
+        reason,
+    )
+
+
+async def _check_and_dead_letter_if_exceeded(
+    redis: aioredis.Redis,
+    raw_id: bytes | str,
+    fields: dict,
+    reason: str = "max_deliveries_exceeded",
+) -> bool:
+    """If the message has reached or exceeded MAX_DELIVERIES, dead-letter and ACK it."""
+    try:
+        raw_id_str = raw_id.decode() if isinstance(raw_id, bytes) else str(raw_id)
+        entries = await redis.xpending_range(
+            STREAM, GROUP, min=raw_id_str, max=raw_id_str, count=1
+        )
+        if entries and entries[0]["times_delivered"] >= MAX_DELIVERIES:
+            await _dead_letter_message(
+                redis,
+                raw_id=raw_id,
+                fields=fields,
+                deliveries=entries[0]["times_delivered"],
+                consumer=entries[0].get("consumer", CONSUMER),
+                reason=reason,
+            )
+            return True
+    except Exception:
+        logger.warning("failed to check pending status for %s", raw_id)
+    return False
+
+
 async def _sweep_dead_letters(redis: aioredis.Redis) -> None:
     """Move PEL messages exceeding MAX_DELIVERIES to the dead-letter stream."""
     try:
         plist = await redis.xpending(STREAM, GROUP)
-    except aioredis.ResponseError:
+    except (aioredis.ResponseError, aioredis.RedisError):
         return
     if not plist or plist.get("pending", 0) == 0:
         return
@@ -234,36 +296,27 @@ async def _sweep_dead_letters(redis: aioredis.Redis) -> None:
     if not total_pending:
         return
 
-    page = await redis.xpending_range(STREAM, GROUP, min="-", max="+", count=100)
+    try:
+        page = await redis.xpending_range(STREAM, GROUP, min="-", max="+", count=100)
+    except (aioredis.ResponseError, aioredis.RedisError):
+        return
+
     dead = [m for m in page if m["times_delivered"] >= MAX_DELIVERIES]
     for entry in dead:
         raw_id = entry["message_id"]
         try:
             data = await redis.xrange(STREAM, min=raw_id, max=raw_id)
             fields = data[0][1] if data else None
-        except (IndexError, aioredis.ResponseError):
+        except (IndexError, aioredis.ResponseError, aioredis.RedisError):
             fields = None
         # Move: write to dead-letter, then ACK (removes from PEL)
-        await redis.xadd(
-            DEAD_LETTER,
-            {
-                "event": (
-                    fields.get(b"event", b"<payload-unavailable>")
-                    if fields
-                    else b"<payload-unavailable>"
-                ),
-                "deliveries": entry["times_delivered"],
-                "last_delivered_by": entry["consumer"],
-                "dead_letter_reason": "max_deliveries_exceeded",
-            },
-        )
-        await redis.xack(STREAM, GROUP, raw_id)
-        logger.critical(
-            "dead-lettered event stream_id=%s after %d deliveries " "(consumer=%s) — moving to %s",
-            raw_id,
-            entry["times_delivered"],
-            entry["consumer"],
-            DEAD_LETTER,
+        await _dead_letter_message(
+            redis,
+            raw_id=raw_id,
+            fields=fields,
+            deliveries=entry["times_delivered"],
+            consumer=entry.get("consumer", CONSUMER),
+            reason="max_deliveries_exceeded",
         )
 
 
@@ -357,19 +410,59 @@ async def _run_graph_ml(
     if signal["score"] < threshold:
         return
 
-    # Build severity from graph signal alone
-    combined = scorer.score([signal])
+    lateral_signals = signal.get("lateral_signals", [])
+    all_signals = [signal] + lateral_signals
 
-    # Map to MITRE technique (FR-12) — use specific technique for lateral movement
+    # Build severity from combined graph signals
+    combined = scorer.score(all_signals)
+
     detail = signal.get("detail", {})
     reason = detail.get("reason", "")
-    mitre_id = _resolve_mitre("ml", "graph_lateral_movement")
+    src = detail.get("src", "?")
+    dst = detail.get("dst", "?")
+    port = detail.get("port", "?")
 
-    description = (
-        f"New internal edge detected: {detail.get('src', '?')} → "
-        f"{detail.get('dst', '?')}:{detail.get('port', '?')} "
-        f"({reason})"
-    )
+    # Determine highest-priority lateral movement or sensitive port finding
+    lateral_path_sig = next((s for s in lateral_signals if s.get("kind") == "graph_lateral_path"), None)
+    sensitive_sig = next((s for s in lateral_signals if s.get("kind") == "graph_sensitive_port"), None)
+    recon_sig = next((s for s in lateral_signals if s.get("kind") == "graph_internal_recon"), None)
+
+    if lateral_path_sig:
+        mitre_id = lateral_path_sig.get("mitre") or _resolve_mitre("ml", "graph_lateral_path")
+        path_str = " → ".join(lateral_path_sig.get("path", []))
+        description = (
+            f"Suspicious multi-hop communication sequence observed: {path_str}:{port}. "
+            f"Potential lateral movement."
+        )
+        detail["trigger"] = "lateral_path"
+        detail["path"] = lateral_path_sig.get("path", [])
+        detail["reason"] = lateral_path_sig.get("reason", reason)
+    elif sensitive_sig:
+        mitre_id = sensitive_sig.get("mitre") or _resolve_mitre("ml", "graph_sensitive_port")
+        service = sensitive_sig.get("service", "unknown")
+        description = (
+            f"Unusual connection attempt to sensitive service '{service}' observed: {src} → {dst}:{port}."
+        )
+        detail["trigger"] = "sensitive_port"
+        detail["service"] = service
+        detail["reason"] = sensitive_sig.get("reason", reason)
+    elif recon_sig:
+        mitre_id = recon_sig.get("mitre") or _resolve_mitre("ml", "graph_internal_recon")
+        port_count = recon_sig.get("port_count", 0)
+        description = (
+            f"Suspicious connection frequency observed: {src} attempted {port_count} distinct ports on {dst}. "
+            f"Potential internal reconnaissance."
+        )
+        detail["trigger"] = "internal_recon"
+        detail["port_count"] = port_count
+        detail["reason"] = recon_sig.get("reason", reason)
+    else:
+        # Standard new edge
+        mitre_id = _resolve_mitre("ml", "graph_lateral_movement")
+        description = (
+            f"New internal communication edge observed: {src} → {dst}:{port} ({reason})."
+        )
+        detail["trigger"] = "new_edge"
 
     alert = Alert(
         event_id=event.event_id,
@@ -546,7 +639,8 @@ async def _process_one(
     # --- Detection latency measurement (NFR: <2s) ---
     # Redis stream ID format: <millisecondsTime>-<sequenceNumber>
     try:
-        stream_ms = int(raw_id.decode().split(b"-")[0])
+        raw_id_str = raw_id.decode() if isinstance(raw_id, bytes) else str(raw_id)
+        stream_ms = int(raw_id_str.split("-")[0])
         stream_ts = stream_ms / 1000.0
     except Exception:
         stream_ts = time.time()  # fallback to wall clock
@@ -554,16 +648,19 @@ async def _process_one(
     t_start = time.monotonic()
 
     try:
-        payload = json.loads(fields[b"event"])
+        raw_event = fields[b"event"] if b"event" in fields else fields["event"]
+        payload = json.loads(raw_event)
         event = Event.model_validate(payload)
     except Exception:
         logger.error(
             "malformed event from stream id=%s, payload=%s\n%s",
             raw_id,
-            fields.get(b"event", b"<missing>"),
+            fields.get(b"event", fields.get("event", b"<missing>")),
             traceback.format_exc(),
         )
-        return  # don't ACK — message stays in PEL for redelivery
+        # Check if deliveries exceeded and dead-letter safely
+        await _check_and_dead_letter_if_exceeded(redis, raw_id, fields, reason="malformed_event")
+        return  # don't ACK unless dead-lettered
 
     t_after_validate = time.monotonic()
 
@@ -576,7 +673,8 @@ async def _process_one(
             json.dumps(payload, default=str),
             traceback.format_exc(),
         )
-        return  # don't ACK — redeliver on next consumer start
+        await _check_and_dead_letter_if_exceeded(redis, raw_id, fields, reason="db_persist_failed")
+        return  # don't ACK unless dead-lettered
 
     t_after_save = time.monotonic()
     await _run_rules(redis, pool, event, hub)
@@ -606,48 +704,105 @@ async def _process_one(
     )
 
 
-async def consumer_loop(
+async def _drain_pending(
     redis: aioredis.Redis,
     pool: asyncpg.Pool,
     hub: AlertHub | None = None,
 ) -> None:
-    """Main consumer loop.  Runs until cancelled."""
-    await _ensure_group(redis)
-    logger.info("consumer loop started — reading from %s", STREAM)
+    """Drain pending messages left from previous runs without looping infinitely.
 
-    # --- Phase 1: drain pending messages left by a previous run ---
-    pending = True
-    while pending:
+    Uses the message ID as cursor to advance through pending entries so un-ACKed
+    malformed entries do not cause an infinite retry loop.
+    """
+    await _sweep_dead_letters(redis)
+
+    last_id = "0"
+    while True:
         results = await redis.xreadgroup(
             GROUP,
             CONSUMER,
-            streams={STREAM: "0"},
+            streams={STREAM: last_id},
             count=BATCH_SIZE,
         )
         if not results:
             break
         stream_messages = results[0][1]
-        for raw_id, fields in stream_messages:
-            await _process_one(redis, pool, raw_id, fields, hub)
-        pending = bool(stream_messages)
+        if not stream_messages:
+            break
 
-    # --- Phase 1b: sweep dead letters (after first drain) ---
+        prev_last_id = last_id
+        for raw_id, fields in stream_messages:
+            msg_id = raw_id.decode() if isinstance(raw_id, bytes) else str(raw_id)
+            last_id = msg_id
+            await _process_one(redis, pool, raw_id, fields, hub)
+
+        await _sweep_dead_letters(redis)
+
+        if last_id == prev_last_id:
+            break
+
     await _sweep_dead_letters(redis)
 
-    logger.info("pending drain complete — switching to live stream")
 
-    # --- Phase 2: read new messages ---
+async def consumer_loop(
+    redis: aioredis.Redis,
+    pool: asyncpg.Pool,
+    hub: AlertHub | None = None,
+) -> None:
+    """Main consumer loop. Runs until cancelled, reconnecting on Redis errors."""
+    retry_delay = 1.0
+    max_delay = 30.0
+
     while True:
-        results = await redis.xreadgroup(
-            GROUP,
-            CONSUMER,
-            streams={STREAM: ">"},
-            count=BATCH_SIZE,
-            block=BLOCK_MS,
-        )
-        if not results:
-            continue
-        stream_messages = results[0][1]
-        for raw_id, fields in stream_messages:
-            await _process_one(redis, pool, raw_id, fields, hub)
-        await _sweep_dead_letters(redis)
+        try:
+            await _ensure_group(redis)
+            logger.info("consumer loop started — reading from %s", STREAM)
+
+            # --- Phase 1: drain pending messages left by a previous run ---
+            await _drain_pending(redis, pool, hub)
+            logger.info("pending drain complete — switching to live stream")
+
+            # Reset backoff on successful connect and pending drain
+            retry_delay = 1.0
+
+            # --- Phase 2: read new messages ---
+            while True:
+                results = await redis.xreadgroup(
+                    GROUP,
+                    CONSUMER,
+                    streams={STREAM: ">"},
+                    count=BATCH_SIZE,
+                    block=BLOCK_MS,
+                )
+                if not results:
+                    continue
+                stream_messages = results[0][1]
+                for raw_id, fields in stream_messages:
+                    await _process_one(redis, pool, raw_id, fields, hub)
+                await _sweep_dead_letters(redis)
+
+        except asyncio.CancelledError:
+            logger.info("consumer loop cancelled — shutting down")
+            raise
+        except (aioredis.ConnectionError, aioredis.TimeoutError, aioredis.RedisError, OSError) as exc:
+            logger.warning(
+                "Redis connection error in consumer loop (%s); retrying in %.1fs...",
+                exc,
+                retry_delay,
+            )
+            try:
+                await asyncio.sleep(retry_delay)
+            except asyncio.CancelledError:
+                logger.info("consumer loop cancelled during retry backoff")
+                raise
+            retry_delay = min(retry_delay * 2, max_delay)
+        except Exception:
+            logger.error(
+                "unexpected error in consumer loop\n%s",
+                traceback.format_exc(),
+            )
+            try:
+                await asyncio.sleep(retry_delay)
+            except asyncio.CancelledError:
+                raise
+            retry_delay = min(retry_delay * 2, max_delay)
