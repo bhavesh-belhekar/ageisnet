@@ -14,6 +14,9 @@ TEST_ALERT = {
     "detection_type": "rule",
     "severity": "medium",
     "mitre_technique_id": "T1043",
+    "mitre_technique_name": "Commonly Used Port",
+    "mitre_tactic_id": "TA0011",
+    "mitre_tactic_name": "Command and Control",
     "description": "Connection to known-bad port 445",
     "shap_explanation": None,
     "acknowledged": False,
@@ -99,6 +102,9 @@ async def test_get_alerts_lists_and_forwards_filters(monkeypatch, client) -> Non
     body = response.json()
     assert len(body) == 1
     assert body[0]["mitre_technique_id"] == "T1043"
+    assert body[0]["mitre_technique_name"] == "Commonly Used Port"
+    assert body[0]["mitre_tactic_id"] == "TA0011"
+    assert body[0]["mitre_tactic_name"] == "Command and Control"
     assert captured["severity"] == "medium"
     assert captured["limit"] == 5
     assert captured["offset"] == 10
@@ -276,3 +282,46 @@ async def test_graph_returns_empty_on_exception(monkeypatch, client) -> None:
     body = response.json()
     assert body["nodes"] == []
     assert body["links"] == []
+
+
+@pytest.mark.asyncio
+async def test_trigger_test_alert_endpoint(monkeypatch, client) -> None:
+    """POST /api/alerts/test creates and broadcasts an alert with full MITRE fields."""
+    from app.main import app
+    from app.ws.alerts_ws import AlertHub
+
+    hub = AlertHub()
+    app.state.alert_hub = hub
+    queue = hub.subscribe()
+
+    async def fake_save_alert(pool, alert_dict):
+        return 777
+
+    monkeypatch.setattr(db_module, "save_alert", fake_save_alert)
+
+    async with client as c:
+        response = await c.post(
+            "/api/alerts/test",
+            json={
+                "container_id": "test-box",
+                "severity": "high",
+                "detection_type": "rule",
+                "technique_id": "T1071",
+                "description": "Trigger test alert",
+            },
+        )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["alert_id"] == 777
+    assert body["container_id"] == "test-box"
+    assert body["mitre_technique_id"] == "T1071"
+    assert body["mitre_technique_name"] == "Application Layer Protocol"
+    assert body["mitre_tactic_id"] == "TA0011"
+    assert body["mitre_tactic_name"] == "Command and Control"
+
+    # Verify broadcast to hub subscriber
+    received = queue.get_nowait()
+    assert received["alert_id"] == 777
+    assert received["mitre_technique_id"] == "T1071"
+    hub.unsubscribe(queue)

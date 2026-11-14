@@ -51,6 +51,9 @@ class TestRuleKnownBadIp:
         assert len(alerts) == 1
         a = alerts[0]
         assert a.mitre_technique_id == "T1071"
+        assert a.mitre_technique_name == "Application Layer Protocol"
+        assert a.mitre_tactic_id == "TA0011"
+        assert a.mitre_tactic_name == "Command and Control"
         assert a.severity == Severity.HIGH
         assert "192.0.2.10" in a.description
 
@@ -60,6 +63,9 @@ class TestRuleKnownBadIp:
         alerts = eng.evaluate(ev)
         assert len(alerts) == 1
         assert alerts[0].mitre_technique_id == "T1071"
+        assert alerts[0].mitre_technique_name == "Application Layer Protocol"
+        assert alerts[0].mitre_tactic_id == "TA0011"
+        assert alerts[0].mitre_tactic_name == "Command and Control"
 
     def test_quiet_on_benign(self) -> None:
         eng = RuleEngine()
@@ -74,6 +80,9 @@ class TestRuleKnownBadPort:
         alerts = eng.evaluate(ev)
         assert len(alerts) == 1
         assert alerts[0].mitre_technique_id == "T1043"
+        assert alerts[0].mitre_technique_name == "Commonly Used Port"
+        assert alerts[0].mitre_tactic_id == "TA0011"
+        assert alerts[0].mitre_tactic_name == "Command and Control"
         assert alerts[0].severity == Severity.MEDIUM
 
     def test_quiet_on_clean_port(self) -> None:
@@ -105,6 +114,9 @@ class TestRulePortScan:
         fired_alerts = [a for alerts in results.values() for a in alerts]
         assert fired_alerts
         assert fired_alerts[0].mitre_technique_id == "T1046"
+        assert fired_alerts[0].mitre_technique_name == "Network Service Discovery"
+        assert fired_alerts[0].mitre_tactic_id == "TA0007"
+        assert fired_alerts[0].mitre_tactic_name == "Discovery"
         assert fired_alerts[0].severity == Severity.HIGH
         assert len(fired_alerts) == 1
 
@@ -191,6 +203,9 @@ class TestRuleRestrictedProtocol:
         alerts = eng.evaluate(ev)
         assert len(alerts) == 1
         assert alerts[0].mitre_technique_id == "T1571"
+        assert alerts[0].mitre_technique_name == "Non-Standard Port"
+        assert alerts[0].mitre_tactic_id == "TA0011"
+        assert alerts[0].mitre_tactic_name == "Command and Control"
         assert alerts[0].severity == Severity.HIGH
 
     def test_fires_lateral_movement_to_restricted_db_from_unknown(self) -> None:
@@ -200,6 +215,9 @@ class TestRuleRestrictedProtocol:
         alerts = eng.evaluate(ev)
         assert len(alerts) == 1
         assert alerts[0].mitre_technique_id == "T1571"
+        assert alerts[0].mitre_technique_name == "Non-Standard Port"
+        assert alerts[0].mitre_tactic_id == "TA0011"
+        assert alerts[0].mitre_tactic_name == "Command and Control"
         assert "lateral movement" in alerts[0].description
 
     def test_allowed_source_connecting_demo_db_is_quiet(self) -> None:

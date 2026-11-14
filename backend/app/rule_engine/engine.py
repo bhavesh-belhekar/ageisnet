@@ -10,6 +10,7 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
 
+from app.mitre_mapper.mapper import get_mitre_info
 from app.models.alert import Alert, DetectionType, Severity
 from app.models.event import Event
 from app.rule_engine import indicators
@@ -29,6 +30,7 @@ EPHEMERAL_PORT_MIN = 32768
 # window so one connection yields one alert per rule.
 ALERT_SUPPRESSION_SECONDS = 15
 
+# Maintained for backward-compatibility with tests / introspection
 _MITRE = {
     "known_bad_ip_connection": "T1071",
     "known_bad_port": "T1043",
@@ -87,6 +89,7 @@ class RuleEngine:
             event.event_id,
             matched_ip,
         )
+        mitre = get_mitre_info("rule", "known_bad_ip_connection")
         return [
             Alert(
                 event_id=event.event_id,
@@ -94,7 +97,10 @@ class RuleEngine:
                 timestamp=event.timestamp,
                 detection_type=DetectionType.RULE,
                 severity=Severity.HIGH,
-                mitre_technique_id=_MITRE["known_bad_ip_connection"],
+                mitre_technique_id=mitre.technique_id if mitre else _MITRE["known_bad_ip_connection"],
+                mitre_technique_name=mitre.technique_name if mitre else None,
+                mitre_tactic_id=mitre.tactic_id if mitre else None,
+                mitre_tactic_name=mitre.tactic_name if mitre else None,
                 description=f"Known-bad IP {matched_ip} in connection "
                 f"{event.src_ip}:{event.src_port} → {event.dst_ip}:{event.dst_port}",
             )
@@ -112,6 +118,7 @@ class RuleEngine:
             event.event_id,
             event.dst_port,
         )
+        mitre = get_mitre_info("rule", "known_bad_port")
         return [
             Alert(
                 event_id=event.event_id,
@@ -119,7 +126,10 @@ class RuleEngine:
                 timestamp=event.timestamp,
                 detection_type=DetectionType.RULE,
                 severity=Severity.MEDIUM,
-                mitre_technique_id=_MITRE["known_bad_port"],
+                mitre_technique_id=mitre.technique_id if mitre else _MITRE["known_bad_port"],
+                mitre_technique_name=mitre.technique_name if mitre else None,
+                mitre_tactic_id=mitre.tactic_id if mitre else None,
+                mitre_tactic_name=mitre.tactic_name if mitre else None,
                 description=f"Connection to known-bad port {event.dst_port} "
                 f"({event.src_ip}:{event.src_port} → {event.dst_ip}:{event.dst_port})",
             )
@@ -167,6 +177,7 @@ class RuleEngine:
             window_sec,
             event.dst_ip,
         )
+        mitre = get_mitre_info("rule", "port_scan")
         return [
             Alert(
                 event_id=event.event_id,
@@ -174,7 +185,10 @@ class RuleEngine:
                 timestamp=event.timestamp,
                 detection_type=DetectionType.RULE,
                 severity=Severity.HIGH,
-                mitre_technique_id=_MITRE["port_scan"],
+                mitre_technique_id=mitre.technique_id if mitre else _MITRE["port_scan"],
+                mitre_technique_name=mitre.technique_name if mitre else None,
+                mitre_tactic_id=mitre.tactic_id if mitre else None,
+                mitre_tactic_name=mitre.tactic_name if mitre else None,
                 description=f"Port scan detected: container {event.container_id} "
                 f"contacted {len(distinct_ports)} distinct destination ports "
                 f"in {window_sec}s window",
@@ -215,6 +229,7 @@ class RuleEngine:
             event.dst_port,
             "; ".join(reasons),
         )
+        mitre = get_mitre_info("rule", "restricted_protocol")
         return [
             Alert(
                 event_id=event.event_id,
@@ -222,7 +237,10 @@ class RuleEngine:
                 timestamp=event.timestamp,
                 detection_type=DetectionType.RULE,
                 severity=Severity.HIGH,
-                mitre_technique_id=_MITRE["restricted_protocol"],
+                mitre_technique_id=mitre.technique_id if mitre else _MITRE["restricted_protocol"],
+                mitre_technique_name=mitre.technique_name if mitre else None,
+                mitre_tactic_id=mitre.tactic_id if mitre else None,
+                mitre_tactic_name=mitre.tactic_name if mitre else None,
                 description=f"Restricted access: container {event.container_id} "
                 f"({event.src_ip}:{event.src_port} → {event.dst_ip}:{event.dst_port}) — "
                 + "; ".join(reasons),

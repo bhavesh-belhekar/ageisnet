@@ -25,6 +25,7 @@ import asyncpg
 import redis.asyncio as aioredis
 
 from app.db.postgres import save_alert, save_event, update_alert_shap
+from app.mitre_mapper.mapper import get_mitre_info, get_mitre_info_by_technique, resolve_mitre
 from app.models.alert import Alert, DetectionType, Severity
 from app.models.event import Event
 from app.risk_scoring.scorer import RiskScorer
@@ -428,7 +429,7 @@ async def _run_graph_ml(
     recon_sig = next((s for s in lateral_signals if s.get("kind") == "graph_internal_recon"), None)
 
     if lateral_path_sig:
-        mitre_id = lateral_path_sig.get("mitre") or _resolve_mitre("ml", "graph_lateral_path")
+        mitre_info = get_mitre_info("ml", "graph_lateral_path")
         path_str = " → ".join(lateral_path_sig.get("path", []))
         description = (
             f"Suspicious multi-hop communication sequence observed: {path_str}:{port}. "
@@ -438,7 +439,8 @@ async def _run_graph_ml(
         detail["path"] = lateral_path_sig.get("path", [])
         detail["reason"] = lateral_path_sig.get("reason", reason)
     elif sensitive_sig:
-        mitre_id = sensitive_sig.get("mitre") or _resolve_mitre("ml", "graph_sensitive_port")
+        sig_mitre = sensitive_sig.get("mitre")
+        mitre_info = get_mitre_info_by_technique(sig_mitre) if sig_mitre else None
         service = sensitive_sig.get("service", "unknown")
         description = (
             f"Unusual connection attempt to sensitive service '{service}' observed: {src} → {dst}:{port}."
@@ -447,7 +449,7 @@ async def _run_graph_ml(
         detail["service"] = service
         detail["reason"] = sensitive_sig.get("reason", reason)
     elif recon_sig:
-        mitre_id = recon_sig.get("mitre") or _resolve_mitre("ml", "graph_internal_recon")
+        mitre_info = get_mitre_info("ml", "graph_internal_recon")
         port_count = recon_sig.get("port_count", 0)
         description = (
             f"Suspicious connection frequency observed: {src} attempted {port_count} distinct ports on {dst}. "
@@ -458,7 +460,7 @@ async def _run_graph_ml(
         detail["reason"] = recon_sig.get("reason", reason)
     else:
         # Standard new edge
-        mitre_id = _resolve_mitre("ml", "graph_lateral_movement")
+        mitre_info = get_mitre_info("ml", "graph_lateral_movement")
         description = (
             f"New internal communication edge observed: {src} → {dst}:{port} ({reason})."
         )
@@ -470,7 +472,10 @@ async def _run_graph_ml(
         timestamp=event.timestamp,
         detection_type=DetectionType.ML,
         severity=combined,
-        mitre_technique_id=mitre_id,
+        mitre_technique_id=mitre_info.technique_id if mitre_info else None,
+        mitre_technique_name=mitre_info.technique_name if mitre_info else None,
+        mitre_tactic_id=mitre_info.tactic_id if mitre_info else None,
+        mitre_tactic_name=mitre_info.tactic_name if mitre_info else None,
         description=description,
         shap_explanation=None,
     )
@@ -556,10 +561,24 @@ async def _run_ml(
     combined = scorer.score([signal])
 
     # Map to MITRE technique (FR-12)
-    mitre_id = _resolve_mitre("ml", "ml_flow_anomaly")
+    features = signal.get("features", {})
+    bytes_sent = features.get("total_bytes_sent", 0)
+    bytes_received = features.get("total_bytes_received", 0)
+    conn_count = features.get("connection_count", 0)
+
+    # Classify flow anomaly based on traffic features
+    if bytes_sent >= 100_000 or (bytes_sent > 10_000 and bytes_sent > 10 * max(bytes_received, 1)):
+        mitre_info = get_mitre_info("ml", "flow_exfiltration_spike")
+        flow_subtype = "data exfiltration spike"
+    elif conn_count >= 10:
+        mitre_info = get_mitre_info("ml", "flow_beaconing")
+        flow_subtype = "beaconing pattern"
+    else:
+        mitre_info = get_mitre_info("fallback", "ml_flow_anomaly")
+        flow_subtype = "flow anomaly"
 
     description = (
-        f"Flow anomaly detected: score={signal['score']:.4f} "
+        f"Flow anomaly detected ({flow_subtype}): score={signal['score']:.4f} "
         f"(threshold={threshold:.2f})"
     )
 
@@ -569,7 +588,10 @@ async def _run_ml(
         timestamp=event.timestamp,
         detection_type=DetectionType.ML,
         severity=combined,
-        mitre_technique_id=mitre_id,
+        mitre_technique_id=mitre_info.technique_id if mitre_info else None,
+        mitre_technique_name=mitre_info.technique_name if mitre_info else None,
+        mitre_tactic_id=mitre_info.tactic_id if mitre_info else None,
+        mitre_tactic_name=mitre_info.tactic_name if mitre_info else None,
         description=description,
         shap_explanation=None,  # Phase 5: computed asynchronously
     )
@@ -607,25 +629,7 @@ async def _run_ml(
 
 def _resolve_mitre(detection_category: str, specific_type: str) -> str | None:
     """Look up the MITRE ATT&CK technique ID for a detection type."""
-    try:
-        from pathlib import Path
-
-        import yaml
-
-        config_path = (
-            Path(__file__).resolve().parents[1] / "config" / "mitre_mapping.yaml"
-        )
-        with open(config_path) as f:
-            mapping = yaml.safe_load(f)
-
-        # Try specific type first, fall back to category-level
-        techniques = mapping.get("detection_type_to_technique", {})
-        return techniques.get(detection_category, {}).get(
-            specific_type, techniques.get("fallback", {}).get(specific_type)
-        )
-    except Exception:
-        logger.warning("MITRE lookup failed for %s/%s", detection_category, specific_type)
-        return None
+    return resolve_mitre(detection_category, specific_type)
 
 
 async def _process_one(

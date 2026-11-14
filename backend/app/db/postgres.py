@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS raw_alerts (
     detection_type      VARCHAR(8)   NOT NULL,
     severity            VARCHAR(8)   NOT NULL,
     mitre_technique_id  VARCHAR(16),
+    mitre_technique_name VARCHAR(64),
+    mitre_tactic_id     VARCHAR(16),
+    mitre_tactic_name   VARCHAR(64),
     description         TEXT         NOT NULL,
     shap_explanation    JSONB,
     acknowledged        BOOLEAN      NOT NULL DEFAULT FALSE
@@ -59,6 +62,9 @@ CREATE INDEX IF NOT EXISTS idx_raw_alerts_ts       ON raw_alerts (timestamp);
 
 MIGRATIONS = """
 ALTER TABLE raw_alerts ADD COLUMN IF NOT EXISTS shap_explanation JSONB;
+ALTER TABLE raw_alerts ADD COLUMN IF NOT EXISTS mitre_technique_name VARCHAR(64);
+ALTER TABLE raw_alerts ADD COLUMN IF NOT EXISTS mitre_tactic_id VARCHAR(16);
+ALTER TABLE raw_alerts ADD COLUMN IF NOT EXISTS mitre_tactic_name VARCHAR(64);
 """
 
 INSERT_SQL = """
@@ -73,8 +79,9 @@ ON CONFLICT (event_id) DO NOTHING
 INSERT_ALERT_SQL = """
 INSERT INTO raw_alerts (
     event_id, container_id, timestamp, detection_type,
-    severity, mitre_technique_id, description, acknowledged
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    severity, mitre_technique_id, mitre_technique_name,
+    mitre_tactic_id, mitre_tactic_name, description, acknowledged
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 RETURNING alert_id
 """
 
@@ -115,6 +122,9 @@ async def save_alert(pool: asyncpg.Pool, alert: dict) -> int:
             alert["detection_type"],
             alert["severity"],
             alert.get("mitre_technique_id"),
+            alert.get("mitre_technique_name"),
+            alert.get("mitre_tactic_id"),
+            alert.get("mitre_tactic_name"),
             alert["description"],
             alert.get("acknowledged", False),
         )

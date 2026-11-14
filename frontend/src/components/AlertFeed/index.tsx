@@ -146,7 +146,14 @@ export default function AlertFeed({
                           {alert.severity}
                         </span>
                         {alert.mitre_technique_id && (
-                          <span className="shrink-0 rounded bg-slate-600 px-1.5 py-0.5 text-xs font-mono text-slate-300">
+                          <span
+                            className="shrink-0 rounded bg-slate-600 px-1.5 py-0.5 text-xs font-mono text-slate-300"
+                            title={
+                              alert.mitre_technique_name
+                                ? `${alert.mitre_technique_id}: ${alert.mitre_technique_name}${alert.mitre_tactic_name ? ` [${alert.mitre_tactic_id ?? "Tactic"}: ${alert.mitre_tactic_name}]` : ""}`
+                                : alert.mitre_technique_id
+                            }
+                          >
                             {alert.mitre_technique_id}
                           </span>
                         )}

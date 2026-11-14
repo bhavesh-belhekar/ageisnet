@@ -9,7 +9,7 @@ class FakeRedis:
     def __init__(self, entries):
         self.entries = entries
 
-    async def xrevrange(self, stream, count):
+    async def xrevrange(self, stream, *args, **kwargs):
         return self.entries
 
 

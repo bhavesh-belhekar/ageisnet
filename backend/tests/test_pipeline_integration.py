@@ -88,6 +88,9 @@ async def test_pipeline_rule_detection_to_alert_and_websocket(mock_redis, mock_p
     assert alert["event_id"] == 9001
     assert alert["severity"] == Severity.HIGH
     assert alert["mitre_technique_id"] == "T1071"
+    assert alert["mitre_technique_name"] == "Application Layer Protocol"
+    assert alert["mitre_tactic_id"] == "TA0011"
+    assert alert["mitre_tactic_name"] == "Command and Control"
     assert alert["detection_type"] == "rule"
 
     # 3. Alert was published to AlertHub and received on subscriber queue

@@ -33,6 +33,8 @@ from __future__ import annotations
 import logging
 import time
 
+from app.mitre_mapper.mapper import get_mitre_info_by_technique
+
 logger = logging.getLogger("graph_model.lateral_movement")
 
 # ---------------------------------------------------------------------------
@@ -331,6 +333,7 @@ class LateralMovementDetector:
     ) -> dict:
         service = SENSITIVE_PORTS[port]
         mitre = SENSITIVE_PORT_MITRE.get(port)
+        mitre_info = get_mitre_info_by_technique(mitre) if mitre else None
         return {
             "kind": "graph_sensitive_port",
             "score": 1.0,
@@ -340,12 +343,17 @@ class LateralMovementDetector:
             "service": service,
             "connection_count": connection_count,
             "mitre": mitre,
+            "technique_id": mitre_info.technique_id if mitre_info else None,
+            "technique_name": mitre_info.technique_name if mitre_info else None,
+            "tactic_id": mitre_info.tactic_id if mitre_info else None,
+            "tactic_name": mitre_info.tactic_name if mitre_info else None,
             "reason": (
                 f"Unusual connection attempt to sensitive service '{service}' observed on port {port}."
             ),
         }
 
     def _internal_recon_signal(self, src: str, dst: str, port_count: int) -> dict:
+        mitre_info = get_mitre_info_by_technique("T1046")
         return {
             "kind": "graph_internal_recon",
             "score": 1.0,
@@ -353,6 +361,10 @@ class LateralMovementDetector:
             "dst": dst,
             "port_count": port_count,
             "mitre": "T1046",
+            "technique_id": mitre_info.technique_id if mitre_info else "T1046",
+            "technique_name": mitre_info.technique_name if mitre_info else "Network Service Discovery",
+            "tactic_id": mitre_info.tactic_id if mitre_info else "TA0007",
+            "tactic_name": mitre_info.tactic_name if mitre_info else "Discovery",
             "reason": (
                 f"Suspicious connection frequency observed: {src} attempted "
                 f"{port_count} distinct ports on {dst}. Potential internal reconnaissance."
@@ -367,12 +379,17 @@ class LateralMovementDetector:
         port: int,
     ) -> dict:
         path = [hop1_src, intermediate, dst]
+        mitre_info = get_mitre_info_by_technique("T1021")
         return {
             "kind": "graph_lateral_path",
             "score": 1.0,
             "path": path,
             "port": port,
             "mitre": "T1021",
+            "technique_id": mitre_info.technique_id if mitre_info else "T1021",
+            "technique_name": mitre_info.technique_name if mitre_info else "Remote Services",
+            "tactic_id": mitre_info.tactic_id if mitre_info else "TA0008",
+            "tactic_name": mitre_info.tactic_name if mitre_info else "Lateral Movement",
             "reason": (
                 f"Suspicious multi-hop communication sequence observed: "
                 f"{hop1_src} → {intermediate} → {dst}:{port}. Potential lateral movement."

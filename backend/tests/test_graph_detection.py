@@ -46,12 +46,18 @@ def test_ssh_and_docker_port_access_not_confirmed_techniques():
     assert len(signals_ssh) == 1
     assert signals_ssh[0]["mitre"] == "T1021"
     assert signals_ssh[0]["mitre"] != "T1021.004"
+    assert signals_ssh[0]["technique_name"] == "Remote Services"
+    assert signals_ssh[0]["tactic_id"] == "TA0008"
+    assert signals_ssh[0]["tactic_name"] == "Lateral Movement"
 
     # Docker API: None (unassigned), NOT T1609
     signals_docker = detector.record_new_edge("container-a", "container-daemon", 2375)
     assert len(signals_docker) == 1
     assert signals_docker[0]["mitre"] is None
     assert signals_docker[0]["mitre"] != "T1609"
+    assert signals_docker[0]["technique_name"] is None
+    assert signals_docker[0]["tactic_id"] is None
+    assert signals_docker[0]["tactic_name"] is None
 
 
 def test_lateral_movement_detector_normal_port_not_flagged_sensitive():
@@ -82,6 +88,9 @@ def test_two_hop_correlation_within_15_minutes():
     assert path_sig["path"] == ["comp-a", "comp-b", "comp-c"]
     assert path_sig["port"] == 5432
     assert path_sig["mitre"] == "T1021"
+    assert path_sig["technique_name"] == "Remote Services"
+    assert path_sig["tactic_id"] == "TA0008"
+    assert path_sig["tactic_name"] == "Lateral Movement"
     assert "Suspicious multi-hop communication sequence observed" in path_sig["reason"]
 
 

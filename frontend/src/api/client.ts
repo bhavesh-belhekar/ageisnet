@@ -25,6 +25,9 @@ export interface Alert {
   detection_type: DetectionType;
   severity: Severity;
   mitre_technique_id: string | null;
+  mitre_technique_name?: string | null;
+  mitre_tactic_id?: string | null;
+  mitre_tactic_name?: string | null;
   description: string;
   shap_explanation: ShapExplanation | null;
   acknowledged: boolean;
