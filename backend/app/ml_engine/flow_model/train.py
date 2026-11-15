@@ -187,9 +187,7 @@ def train() -> dict:
     )
     model.fit(train_scaled)
     logger.info("Isolation Forest trained: %d estimators", model.n_estimators)
-    background_indices = np.linspace(
-        0, len(train_scaled) - 1, num=min(100, len(train_scaled)), dtype=int
-    )
+    background_index = int(np.argmin(np.linalg.norm(train_scaled, axis=1)))
 
     # --- FP validation on held-out val set ---
     fp_rate = None
@@ -233,7 +231,7 @@ def train() -> dict:
         # Small representative reference set lets SHAP explain the same
         # decision_function that inference thresholds, rather than an
         # implementation-specific IsolationForest tree output.
-        "shap_background": train_scaled[background_indices].copy(),
+        "shap_background": train_scaled[[background_index]].copy(),
         "feature_names": FEATURE_ORDER,
         "cap_values": dict(zip(FEATURE_ORDER, cap_values.tolist())),
         "training_meta": {
@@ -243,6 +241,7 @@ def train() -> dict:
             "cap_exclude": cap_exclude_names,
             "contamination": contamination,
             "random_state": random_state,
+            "data_source": os.environ.get("TRAINING_DATA_SOURCE", "captured_postgres_baseline"),
             "fp_rate_on_val": fp_rate,
             "validation_status": "normal_only; anomaly recall requires labeled attack data",
             "changelog": (

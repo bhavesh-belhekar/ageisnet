@@ -49,8 +49,10 @@ JSON output alongside experiment notes outside Git so results are auditable.
 
 ## SHAP interpretation
 
-The evaluator checks that each held-out row receives finite SHAP values for
-all model features and that the contributions reconstruct the decision score.
+The evaluator checks finite SHAP values for every feature on a balanced sample
+from the confusion-matrix groups (four rows by default) and verifies that the
+contributions reconstruct the decision score. Metrics still use the entire
+holdout.
 Contribution magnitude ranks which features most affected the score for that
 sample. It does not by itself establish
 causality or validate detection quality; the held-out labels and metrics do

@@ -72,7 +72,7 @@ def _ensure_explainer() -> tuple[Any, dict] | None:
             raise ValueError("model artifact has no valid SHAP background; retrain the model")
         masker = shap.maskers.Independent(np.asarray(background, dtype=np.float64))
         _tree_explainer = shap.Explainer(model.decision_function, masker, algorithm="exact")
-        logger.info("Exact SHAP explainer initialized for IsolationForest decision_function")
+        logger.info("SHAP explainer initialized for IsolationForest decision_function")
         return _tree_explainer, _model_bundle
     except Exception:
         logger.critical("SHAP explainer init failed\n%s", traceback.format_exc())
