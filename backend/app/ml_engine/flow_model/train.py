@@ -39,9 +39,9 @@ v2 changelog (vs v1):
 from __future__ import annotations
 
 import csv
-import json
 import logging
 import os
+import pickle
 import sys
 from pathlib import Path
 
@@ -54,7 +54,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 
 sys.path.insert(0, str(_REPO_ROOT / "backend"))
 
-from app.config.settings import get_settings  # noqa: E402
 from app.ml_engine.flow_model.features import FEATURE_ORDER, preprocess_features  # noqa: E402
 
 logger = logging.getLogger("flow_model.train")
@@ -84,10 +83,16 @@ def _read_csv(path: Path) -> np.ndarray:
     with open(path, newline="") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
+    if not rows:
+        raise ValueError(f"baseline CSV is empty: {path}")
     matrix = np.array(
         [[float(r[col]) for col in FEATURE_ORDER] for r in rows],
         dtype=np.float64,
     )
+    if not np.isfinite(matrix).all():
+        raise ValueError(f"baseline CSV contains non-finite feature values: {path}")
+    if (matrix < 0).any():
+        raise ValueError(f"baseline CSV contains negative feature values: {path}")
     return matrix
 
 
@@ -121,8 +126,6 @@ def train() -> dict:
 
     Returns the saved artifact dict for inspection.
     """
-    import pickle
-
     config = _load_config()
     cap_pct = config.get("cap_percentile", 0.99)
     contamination = config.get("contamination", 0.05)
@@ -154,6 +157,11 @@ def train() -> dict:
             "Run scripts/collect_baseline.py first."
         )
     train_matrix = _read_csv(TRAIN_CSV)
+    if len(train_matrix) < 20:
+        raise ValueError(
+            f"only {len(train_matrix)} training windows; collect at least 20 "
+            "(50+ is recommended) before fitting an Isolation Forest"
+        )
     logger.info("loaded %d training windows, %d features", *train_matrix.shape)
 
     # --- Apply percentile cap (per-feature; excluded features left uncapped) ---
@@ -179,12 +187,22 @@ def train() -> dict:
     )
     model.fit(train_scaled)
     logger.info("Isolation Forest trained: %d estimators", model.n_estimators)
+    background_indices = np.linspace(
+        0, len(train_scaled) - 1, num=min(100, len(train_scaled)), dtype=int
+    )
 
     # --- FP validation on held-out val set ---
     fp_rate = None
     val_count = 0
+    if not VAL_CSV.exists():
+        raise FileNotFoundError(
+            f"held-out normal validation CSV not found at {VAL_CSV}; "
+            "collect a separate baseline validation split before training"
+        )
     if VAL_CSV.exists():
         val_matrix = _read_csv(VAL_CSV)
+        if len(val_matrix) < 5:
+            raise ValueError("at least 5 held-out normal windows are required for validation")
         # Use consistent preprocessing matching inference pipeline
         _, val_scaled = preprocess_features(
             val_matrix,
@@ -212,6 +230,10 @@ def train() -> dict:
     artifact = {
         "model": model,
         "scaler": scaler,
+        # Small representative reference set lets SHAP explain the same
+        # decision_function that inference thresholds, rather than an
+        # implementation-specific IsolationForest tree output.
+        "shap_background": train_scaled[background_indices].copy(),
         "feature_names": FEATURE_ORDER,
         "cap_values": dict(zip(FEATURE_ORDER, cap_values.tolist())),
         "training_meta": {
@@ -222,6 +244,7 @@ def train() -> dict:
             "contamination": contamination,
             "random_state": random_state,
             "fp_rate_on_val": fp_rate,
+            "validation_status": "normal_only; anomaly recall requires labeled attack data",
             "changelog": (
                 "v2: restored cap_percentile=0.99 for continuous features; "
                 "excluded unique_dst_ips from capping (near-binary, capping "

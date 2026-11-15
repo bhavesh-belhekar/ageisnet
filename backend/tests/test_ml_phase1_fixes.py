@@ -500,6 +500,7 @@ def test_app_shap_ensure_explainer_with_mocked_bundle():
             "scaler": scaler,
             "feature_names": FEATURE_ORDER,
             "cap_values": dict(zip(FEATURE_ORDER, [50.0] * len(FEATURE_ORDER))),
+            "shap_background": scaler.transform(X)[:20],
         }
 
         # Clear globals to force execution of the _ensure_explainer loader
@@ -517,7 +518,7 @@ def test_app_shap_ensure_explainer_with_mocked_bundle():
         explainer, bundle = result
         assert bundle is mock_bundle
         assert explainer is not None
-        assert hasattr(explainer, "shap_values")
+        assert callable(explainer)
 
     finally:
         # Strictly restore original application globals

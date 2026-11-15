@@ -2,10 +2,10 @@
 
 Provides two explainer paths:
 
-1. **Flow model (Isolation Forest):** Uses ``shap.TreeExplainer`` to
-   compute exact per-feature SHAP values.  The tree structure of the
-   forest allows efficient, exact decomposition without background
-   sampling.
+1. **Flow model (Isolation Forest):** Uses SHAP's exact explainer over
+   the model's ``decision_function`` and a representative training sample.
+   This matches the output used by inference (higher means more normal),
+   so contribution direction is meaningful to the alert score.
 
 2. **Graph model (heuristic):** Not a trained model — returns a
    deterministic ``explanation_type: "rule_based"`` dict describing
@@ -38,7 +38,9 @@ import numpy as np
 logger = logging.getLogger("shap_explainer")
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_ARTIFACT_DIR = Path(os.environ.get("MODEL_ARTIFACT_DIR", str(_REPO_ROOT / "data" / "model_artifacts")))
+_ARTIFACT_DIR = Path(
+    os.environ.get("MODEL_ARTIFACT_DIR", str(_REPO_ROOT / "data" / "model_artifacts"))
+)
 _ARTIFACT_PATH = Path(_ARTIFACT_DIR) / "flow_model_v2.pkl"
 
 _tree_explainer: Any = None
@@ -61,17 +63,19 @@ def _ensure_explainer() -> tuple[Any, dict] | None:
 
     try:
         import shap
-        from sklearn.ensemble import IsolationForest
-
         with open(_ARTIFACT_PATH, "rb") as f:
             _model_bundle = pickle.load(f)
 
         model = _model_bundle["model"]
-        _tree_explainer = shap.TreeExplainer(model)
-        logger.info("TreeExplainer initialized for IsolationForest")
+        background = _model_bundle.get("shap_background")
+        if background is None or np.asarray(background).ndim != 2:
+            raise ValueError("model artifact has no valid SHAP background; retrain the model")
+        masker = shap.maskers.Independent(np.asarray(background, dtype=np.float64))
+        _tree_explainer = shap.Explainer(model.decision_function, masker, algorithm="exact")
+        logger.info("Exact SHAP explainer initialized for IsolationForest decision_function")
         return _tree_explainer, _model_bundle
     except Exception:
-        logger.critical("TreeExplainer init failed\n%s", traceback.format_exc())
+        logger.critical("SHAP explainer init failed\n%s", traceback.format_exc())
         return None
 
 
@@ -100,10 +104,20 @@ async def explain_flow(
     t0 = time.time()
 
     try:
-        arr = np.array([scaled_vector], dtype=np.float64)
+        expected_names = bundle.get("feature_names", feature_names)
+        if list(feature_names) != list(expected_names):
+            raise ValueError("feature order does not match the trained model artifact")
+        arr = np.asarray([scaled_vector], dtype=np.float64)
+        if arr.shape[1] != len(feature_names) or not np.isfinite(arr).all():
+            raise ValueError("scaled feature vector has invalid shape or values")
 
-        # TreeExplainer.shap_values returns an array of shape (1, n_features)
-        shap_values = explainer.shap_values(arr)[0]
+        shap_result = explainer(arr)
+        shap_values = np.asarray(shap_result.values[0], dtype=np.float64)
+        base_value = float(np.asarray(shap_result.base_values).reshape(-1)[0])
+        if shap_values.shape != (len(feature_names),) or not np.isfinite(shap_values).all():
+            raise ValueError("SHAP returned invalid contribution values")
+        decision_score = float(bundle["model"].decision_function(arr)[0])
+        additivity_error = abs(base_value + float(shap_values.sum()) - decision_score)
 
         # Build per-feature explanation
         contributions = {}
@@ -111,7 +125,7 @@ async def explain_flow(
             contributions[name] = {
                 "value": raw_features.get(name, 0.0),
                 "shap": float(round(shap_values[i], 6)),
-                "direction": "anomaly_push" if shap_values[i] > 0 else "normalizing",
+                "direction": "anomaly_push" if shap_values[i] < 0 else "normalizing",
             }
 
         # Sort by absolute SHAP value (most impactful first)
@@ -133,6 +147,10 @@ async def explain_flow(
         return {
             "explanation_type": "shap",
             "model": "isolation_forest",
+            "output": "decision_function (higher means more normal)",
+            "base_value": float(round(base_value, 6)),
+            "decision_score": float(round(decision_score, 6)),
+            "additivity_error": float(round(additivity_error, 8)),
             "top_features": [
                 {"feature": name, **data}
                 for name, data in sorted_features[:3]
