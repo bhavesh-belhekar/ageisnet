@@ -3,8 +3,10 @@
 
 # Trained models & datasets (RULES.md Section 7)
 data/model_artifacts/*.pkl
+!data/model_artifacts/flow_model_v2_synthetic.pkl
 data/model_artifacts/*.pt
 data/training_baselines/*.csv
+data/evaluation/*.csv
 
 # Python
 __pycache__/

@@ -31,6 +31,9 @@ class Alert(BaseModel):
     detection_type: DetectionType
     severity: Severity
     mitre_technique_id: str | None = None
+    mitre_technique_name: str | None = None
+    mitre_tactic_id: str | None = None
+    mitre_tactic_name: str | None = None
     description: str
     shap_explanation: dict | None = None
     acknowledged: bool = False

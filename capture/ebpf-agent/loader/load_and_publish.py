@@ -88,14 +88,20 @@ def build_container_info() -> tuple[dict[int, str], dict[str, str]]:
         "/sys/fs/cgroup/system.slice/docker-*.scope",
         "/sys/fs/cgroup/docker-*.scope",
         "/sys/fs/cgroup/docker-*/",
+        "/sys/fs/cgroup/docker/*/",
     ]
     for pattern in patterns:
         for path in glob(pattern):
             scope = os.path.basename(path.rstrip("/"))
-            cid = re.sub(r"^docker-", "", scope)
-            cid = re.sub(r"\.scope$", "", cid)
-            if len(cid) < 12:
-                continue
+            if pattern == "/sys/fs/cgroup/docker/*/":
+                if not re.match(r"^[0-9a-fA-F]{64}$", scope):
+                    continue
+                cid = scope
+            else:
+                cid = re.sub(r"^docker-", "", scope)
+                cid = re.sub(r"\.scope$", "", cid)
+                if len(cid) < 12:
+                    continue
             procs_path = os.path.join(path, "cgroup.procs")
             try:
                 with open(procs_path) as handle:

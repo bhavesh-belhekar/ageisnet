@@ -1,5 +1,6 @@
 import pytest
 from app.api import health as health_module
+from app.db import neo4j_client as neo4j_module
 from app.db import postgres as db_module
 from app.db.postgres import DatabaseUnavailableError
 from app.main import app
@@ -13,6 +14,9 @@ TEST_ALERT = {
     "detection_type": "rule",
     "severity": "medium",
     "mitre_technique_id": "T1043",
+    "mitre_technique_name": "Commonly Used Port",
+    "mitre_tactic_id": "TA0011",
+    "mitre_tactic_name": "Command and Control",
     "description": "Connection to known-bad port 445",
     "shap_explanation": None,
     "acknowledged": False,
@@ -98,6 +102,9 @@ async def test_get_alerts_lists_and_forwards_filters(monkeypatch, client) -> Non
     body = response.json()
     assert len(body) == 1
     assert body[0]["mitre_technique_id"] == "T1043"
+    assert body[0]["mitre_technique_name"] == "Commonly Used Port"
+    assert body[0]["mitre_tactic_id"] == "TA0011"
+    assert body[0]["mitre_tactic_name"] == "Command and Control"
     assert captured["severity"] == "medium"
     assert captured["limit"] == 5
     assert captured["offset"] == 10
@@ -201,3 +208,120 @@ async def test_invalid_severity_filter_rejected(client) -> None:
         response = await c.get("/api/alerts", params={"severity": "critical"})
 
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Stage 3A: Graph API tests (FR-2.2 / ARCHITECTURE.md §3.6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_graph_returns_empty_when_no_edges(monkeypatch, client) -> None:
+    """GET /api/graph returns empty nodes and links when no edges exist."""
+
+    class FakeClient:
+        async def get_all_edges(self):
+            return {}
+
+    monkeypatch.setattr(neo4j_module, "_client", FakeClient())
+    async with client as c:
+        response = await c.get("/api/graph")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["nodes"] == []
+    assert body["links"] == []
+
+
+@pytest.mark.asyncio
+async def test_graph_returns_nodes_and_links(monkeypatch, client) -> None:
+    """GET /api/graph returns correct nodes and link structure from edge data."""
+
+    class FakeClient:
+        async def get_all_edges(self):
+            return {
+                ("aaa111", "bbb222", 5432): {
+                    "first_seen": 1000.0,
+                    "last_seen": 2000.0,
+                    "protocol": "tcp",
+                    "is_anomalous": True,
+                }
+            }
+
+    monkeypatch.setattr(neo4j_module, "_client", FakeClient())
+    async with client as c:
+        response = await c.get("/api/graph")
+
+    assert response.status_code == 200
+    body = response.json()
+    node_ids = [n["id"] for n in body["nodes"]]
+    assert "aaa111" in node_ids
+    assert "bbb222" in node_ids
+    assert len(body["links"]) == 1
+    link = body["links"][0]
+    assert link["source"] == "aaa111"
+    assert link["target"] == "bbb222"
+    assert link["port"] == 5432
+    assert link["is_anomalous"] is True
+    assert link["protocol"] == "tcp"
+
+
+@pytest.mark.asyncio
+async def test_graph_returns_empty_on_exception(monkeypatch, client) -> None:
+    """GET /api/graph returns empty graph (200) when graph client raises."""
+
+    class BrokenClient:
+        async def get_all_edges(self):
+            raise RuntimeError("neo4j down")
+
+    monkeypatch.setattr(neo4j_module, "_client", BrokenClient())
+    async with client as c:
+        response = await c.get("/api/graph")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["nodes"] == []
+    assert body["links"] == []
+
+
+@pytest.mark.asyncio
+async def test_trigger_test_alert_endpoint(monkeypatch, client) -> None:
+    """POST /api/alerts/test creates and broadcasts an alert with full MITRE fields."""
+    from app.main import app
+    from app.ws.alerts_ws import AlertHub
+
+    hub = AlertHub()
+    app.state.alert_hub = hub
+    queue = hub.subscribe()
+
+    async def fake_save_alert(pool, alert_dict):
+        return 777
+
+    monkeypatch.setattr(db_module, "save_alert", fake_save_alert)
+
+    async with client as c:
+        response = await c.post(
+            "/api/alerts/test",
+            json={
+                "container_id": "test-box",
+                "severity": "high",
+                "detection_type": "rule",
+                "technique_id": "T1071",
+                "description": "Trigger test alert",
+            },
+        )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["alert_id"] == 777
+    assert body["container_id"] == "test-box"
+    assert body["mitre_technique_id"] == "T1071"
+    assert body["mitre_technique_name"] == "Application Layer Protocol"
+    assert body["mitre_tactic_id"] == "TA0011"
+    assert body["mitre_tactic_name"] == "Command and Control"
+
+    # Verify broadcast to hub subscriber
+    received = queue.get_nowait()
+    assert received["alert_id"] == 777
+    assert received["mitre_technique_id"] == "T1071"
+    hub.unsubscribe(queue)

@@ -212,12 +212,38 @@ export default function AlertDetail({ alert, onClose }: AlertDetailProps) {
           </dd>
         </div>
         <div>
-          <dt className="text-slate-400">MITRE Technique</dt>
-          <dd className="mt-0.5 font-mono text-xs">{alert.mitre_technique_id ?? "\u2014"}</dd>
-        </div>
-        <div>
           <dt className="text-slate-400">Timestamp</dt>
           <dd className="mt-0.5 text-xs">{formatTime(alert.timestamp)}</dd>
+        </div>
+        <div>
+          <dt className="text-slate-400">MITRE Tactic</dt>
+          <dd className="mt-0.5 font-mono text-xs">
+            {alert.mitre_tactic_id ? (
+              <span>
+                <span className="font-semibold text-slate-200">{alert.mitre_tactic_id}</span>
+                {alert.mitre_tactic_name && (
+                  <span className="text-slate-400 font-sans ml-1">({alert.mitre_tactic_name})</span>
+                )}
+              </span>
+            ) : (
+              "\u2014"
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-slate-400">MITRE Technique</dt>
+          <dd className="mt-0.5 font-mono text-xs">
+            {alert.mitre_technique_id ? (
+              <span>
+                <span className="font-semibold text-slate-200">{alert.mitre_technique_id}</span>
+                {alert.mitre_technique_name && (
+                  <span className="text-slate-400 font-sans ml-1">({alert.mitre_technique_name})</span>
+                )}
+              </span>
+            ) : (
+              "\u2014"
+            )}
+          </dd>
         </div>
       </dl>
 

@@ -170,11 +170,14 @@ def _aggregate(events: list[dict]) -> list[dict]:
     rows = []
     for (cid, window_start), b in sorted(buckets.items()):
         ts_list = b["timestamps"]
+        # Match live inference: fewer than 2 events cannot form a meaningful
+        # duration aggregate and are dropped by extract_flow_features().
         if len(ts_list) < 2:
-            window_seconds = WINDOW_MINUTES * 60
-        else:
-            span = ts_list[-1] - ts_list[0]
-            window_seconds = max(span.total_seconds(), 1.0)
+            continue
+
+        # Strict mathematical parity with extract_flow_features: max - min
+        span = max(ts_list) - min(ts_list)
+        window_seconds = max(span.total_seconds(), 1.0)
 
         rows.append(
             {
@@ -189,6 +192,45 @@ def _aggregate(events: list[dict]) -> list[dict]:
             }
         )
     return rows
+
+
+def split_chronological(
+    rows: list[dict], train_ratio: float = 0.8
+) -> tuple[list[dict], list[dict]]:
+    """Chronologically split feature rows on unique window timestamp boundaries.
+
+    Validates that the model can predict future traffic of the same monitored
+    containers without temporal lookahead leakage. Does not evaluate generalization
+    to unseen containers.
+
+    Raises:
+        ValueError: If rows contains fewer than 2 distinct window_start timestamps.
+    """
+    if not rows:
+        raise ValueError("Cannot split empty baseline dataset.")
+
+    sorted_rows = sorted(rows, key=lambda r: r["window_start"])
+    unique_windows = sorted({r["window_start"] for r in sorted_rows})
+
+    if len(unique_windows) < 2:
+        raise ValueError(
+            f"Dataset contains only {len(unique_windows)} unique window timestamp(s). "
+            "Chronological validation requires at least 2 distinct timestamps. "
+            "Collect baseline traffic over a longer duration."
+        )
+
+    split_cutoff_idx = max(int(len(unique_windows) * train_ratio), 1)
+    if split_cutoff_idx >= len(unique_windows):
+        split_cutoff_idx = len(unique_windows) - 1
+
+    cutoff_time = unique_windows[split_cutoff_idx]
+    train_rows = [r for r in sorted_rows if r["window_start"] < cutoff_time]
+    val_rows = [r for r in sorted_rows if r["window_start"] >= cutoff_time]
+
+    if not val_rows:
+        raise ValueError("Chronological split resulted in an empty validation partition.")
+
+    return train_rows, val_rows
 
 
 def _write_csv(rows: list[dict], path: Path) -> None:
@@ -252,15 +294,11 @@ def main() -> None:
             "demo environment longer and re-running this script.\n"
         )
 
-    # Shuffle before splitting (deterministic seed for reproducibility)
-    import random
-
-    random.seed(42)
-    random.shuffle(rows)
-
-    split_idx = int(len(rows) * 0.8)
-    train_rows = sorted(rows[:split_idx], key=lambda r: r["window_start"])
-    val_rows = sorted(rows[split_idx:], key=lambda r: r["window_start"])
+    try:
+        train_rows, val_rows = split_chronological(rows, train_ratio=0.8)
+    except ValueError as exc:
+        print(f"\nERROR: Chronological split failed: {exc}\n")
+        sys.exit(1)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     _write_csv(train_rows, TRAIN_FILE)

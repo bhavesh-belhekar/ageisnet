@@ -12,6 +12,9 @@ onto a single Low/Medium/High severity label per event:
 * an ML graph signal contributes ``ml_graph_anomaly`` (1) when its score
   crosses ``graph_new_edge_threshold`` — still LOW until graph FP validation
   (Phase 8 follow-up) is complete
+* a graph sensitive port signal contributes ``graph_sensitive_port_weight`` (2)
+* a graph lateral path signal contributes ``graph_lateral_path_weight`` (3)
+* a graph internal recon signal contributes ``graph_internal_recon_weight`` (2)
 * ``hard_height_override: true`` forces High when any single rule signal is
   High, so a lone high-severity rule hit can never be downgraded by summation
 * otherwise the total is tiered: ``high_min`` -> High, ``medium_min`` -> Medium,
@@ -61,6 +64,9 @@ class RiskScorer:
         * ``{"kind": "rule", "severity": "medium"}``
         * ``{"kind": "ml_flow", "score": 0.71}`` (Phase 4)
         * ``{"kind": "ml_graph", "score": 1.0}`` (Phase 4)
+        * ``{"kind": "graph_sensitive_port", "score": 1.0}`` (Phase 3E)
+        * ``{"kind": "graph_lateral_path", "score": 1.0}`` (Phase 3E)
+        * ``{"kind": "graph_internal_recon", "score": 1.0}`` (Phase 3E)
         """
         total = 0
         any_high = False
@@ -80,6 +86,18 @@ class RiskScorer:
                 threshold = self._ml_thresholds.get("graph_new_edge_threshold", 1.0)
                 if signal["score"] >= threshold:
                     total += self._weights["ml_graph_anomaly"]
+            elif kind == "graph_sensitive_port":
+                threshold = self._ml_thresholds.get("graph_sensitive_port_threshold", 1.0)
+                if signal["score"] >= threshold:
+                    total += self._weights.get("graph_sensitive_port_weight", 2)
+            elif kind == "graph_lateral_path":
+                threshold = self._ml_thresholds.get("graph_lateral_path_threshold", 1.0)
+                if signal["score"] >= threshold:
+                    total += self._weights.get("graph_lateral_path_weight", 3)
+            elif kind == "graph_internal_recon":
+                threshold = self._ml_thresholds.get("graph_internal_recon_threshold", 1.0)
+                if signal["score"] >= threshold:
+                    total += self._weights.get("graph_internal_recon_weight", 2)
 
         if self._override and any_high:
             return Severity.HIGH

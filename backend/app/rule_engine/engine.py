@@ -10,16 +10,10 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
 
+from app.mitre_mapper.mapper import get_mitre_info
 from app.models.alert import Alert, DetectionType, Severity
 from app.models.event import Event
-from app.rule_engine.indicators import (
-    get_known_bad_ips,
-    get_known_bad_ports,
-    get_port_scan_threshold,
-    get_port_scan_window_seconds,
-    get_restricted_connections,
-    get_restricted_ports,
-)
+from app.rule_engine import indicators
 
 logger = logging.getLogger("rule_engine")
 
@@ -36,14 +30,13 @@ EPHEMERAL_PORT_MIN = 32768
 # window so one connection yields one alert per rule.
 ALERT_SUPPRESSION_SECONDS = 15
 
+# Maintained for backward-compatibility with tests / introspection
 _MITRE = {
     "known_bad_ip_connection": "T1071",
     "known_bad_port": "T1043",
     "port_scan": "T1046",
     "restricted_protocol": "T1571",
 }
-
-# Pre-load indicators once at import time (lru_cache inside each getter).
 
 
 class RuleEngine:
@@ -83,7 +76,7 @@ class RuleEngine:
     # ------------------------------------------------------------------
     @staticmethod
     def _rule_known_bad_ip(event: Event) -> list[Alert]:
-        bad = get_known_bad_ips()
+        bad = indicators.get_known_bad_ips()
         matched_ip = None
         if event.src_ip in bad:
             matched_ip = event.src_ip
@@ -96,6 +89,7 @@ class RuleEngine:
             event.event_id,
             matched_ip,
         )
+        mitre = get_mitre_info("rule", "known_bad_ip_connection")
         return [
             Alert(
                 event_id=event.event_id,
@@ -103,7 +97,10 @@ class RuleEngine:
                 timestamp=event.timestamp,
                 detection_type=DetectionType.RULE,
                 severity=Severity.HIGH,
-                mitre_technique_id=_MITRE["known_bad_ip_connection"],
+                mitre_technique_id=mitre.technique_id if mitre else _MITRE["known_bad_ip_connection"],
+                mitre_technique_name=mitre.technique_name if mitre else None,
+                mitre_tactic_id=mitre.tactic_id if mitre else None,
+                mitre_tactic_name=mitre.tactic_name if mitre else None,
                 description=f"Known-bad IP {matched_ip} in connection "
                 f"{event.src_ip}:{event.src_port} → {event.dst_ip}:{event.dst_port}",
             )
@@ -114,13 +111,14 @@ class RuleEngine:
     # ------------------------------------------------------------------
     @staticmethod
     def _rule_known_bad_port(event: Event) -> list[Alert]:
-        if event.dst_port not in get_known_bad_ports():
+        if event.dst_port not in indicators.get_known_bad_ports():
             return []
         logger.warning(
             "RULE-002 fired: event_id=%d dst_port=%d in known-bad list",
             event.event_id,
             event.dst_port,
         )
+        mitre = get_mitre_info("rule", "known_bad_port")
         return [
             Alert(
                 event_id=event.event_id,
@@ -128,7 +126,10 @@ class RuleEngine:
                 timestamp=event.timestamp,
                 detection_type=DetectionType.RULE,
                 severity=Severity.MEDIUM,
-                mitre_technique_id=_MITRE["known_bad_port"],
+                mitre_technique_id=mitre.technique_id if mitre else _MITRE["known_bad_port"],
+                mitre_technique_name=mitre.technique_name if mitre else None,
+                mitre_tactic_id=mitre.tactic_id if mitre else None,
+                mitre_tactic_name=mitre.tactic_name if mitre else None,
                 description=f"Connection to known-bad port {event.dst_port} "
                 f"({event.src_ip}:{event.src_port} → {event.dst_ip}:{event.dst_port})",
             )
@@ -138,8 +139,8 @@ class RuleEngine:
     # RULE-003: port scan (T1046)
     # ------------------------------------------------------------------
     def _rule_port_scan(self, event: Event) -> list[Alert]:
-        threshold = get_port_scan_threshold()
-        window_sec = get_port_scan_window_seconds()
+        threshold = indicators.get_port_scan_threshold()
+        window_sec = indicators.get_port_scan_window_seconds()
         now = event.timestamp
         cutoff = now - timedelta(seconds=window_sec)
 
@@ -176,6 +177,7 @@ class RuleEngine:
             window_sec,
             event.dst_ip,
         )
+        mitre = get_mitre_info("rule", "port_scan")
         return [
             Alert(
                 event_id=event.event_id,
@@ -183,7 +185,10 @@ class RuleEngine:
                 timestamp=event.timestamp,
                 detection_type=DetectionType.RULE,
                 severity=Severity.HIGH,
-                mitre_technique_id=_MITRE["port_scan"],
+                mitre_technique_id=mitre.technique_id if mitre else _MITRE["port_scan"],
+                mitre_technique_name=mitre.technique_name if mitre else None,
+                mitre_tactic_id=mitre.tactic_id if mitre else None,
+                mitre_tactic_name=mitre.tactic_name if mitre else None,
                 description=f"Port scan detected: container {event.container_id} "
                 f"contacted {len(distinct_ports)} distinct destination ports "
                 f"in {window_sec}s window",
@@ -197,20 +202,22 @@ class RuleEngine:
     def _rule_restricted_protocol(event: Event) -> list[Alert]:
         reasons: list[str] = []
 
-        if event.dst_port in get_restricted_ports():
+        if event.dst_port in indicators.get_restricted_ports():
             reasons.append(f"restricted port {event.dst_port} not whitelisted")
 
-        for rule in get_restricted_connections():
+        for rule in indicators.get_restricted_connections():
             if rule.get("dst_port") != event.dst_port:
                 continue
             if event.dst_ip not in rule.get("dst_ips", set()):
                 continue
-            allowed = set(rule.get("allowed_sources", []))
-            if event.container_id not in allowed:
-                reasons.append(
-                    f"lateral movement to {rule.get('dst_container')}:{event.dst_port} "
-                    f"from unauthorized source {event.container_id}"
-                )
+            allowed_ips = rule.get("allowed_ips", set())
+            allowed_ids = rule.get("allowed_ids", set()) or set(rule.get("allowed_sources", []))
+            if event.src_ip in allowed_ips or event.container_id in allowed_ids:
+                continue
+            reasons.append(
+                f"lateral movement to {rule.get('dst_container')}:{event.dst_port} "
+                f"from unauthorized source {event.container_id}"
+            )
 
         if not reasons:
             return []
@@ -222,6 +229,7 @@ class RuleEngine:
             event.dst_port,
             "; ".join(reasons),
         )
+        mitre = get_mitre_info("rule", "restricted_protocol")
         return [
             Alert(
                 event_id=event.event_id,
@@ -229,7 +237,10 @@ class RuleEngine:
                 timestamp=event.timestamp,
                 detection_type=DetectionType.RULE,
                 severity=Severity.HIGH,
-                mitre_technique_id=_MITRE["restricted_protocol"],
+                mitre_technique_id=mitre.technique_id if mitre else _MITRE["restricted_protocol"],
+                mitre_technique_name=mitre.technique_name if mitre else None,
+                mitre_tactic_id=mitre.tactic_id if mitre else None,
+                mitre_tactic_name=mitre.tactic_name if mitre else None,
                 description=f"Restricted access: container {event.container_id} "
                 f"({event.src_ip}:{event.src_port} → {event.dst_ip}:{event.dst_port}) — "
                 + "; ".join(reasons),

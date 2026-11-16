@@ -6,11 +6,18 @@ internal (east-west) events are scored; external events return ``None``.
 Usage (called by ``event_consumer._run_graph_ml()``)::
 
     signal = await score_graph_event(event)
-    # signal is {"kind": "ml_graph", "score": 1.0, "detail": {...}} or None
+    # signal is {\"kind\": \"ml_graph\", \"score\": 1.0, \"detail\": {...},
+    #            \"lateral_signals\": [...]} or None
 
-The score is ``1.0`` for a new edge (binary heuristic, per FR-5.2) and
-``0.0`` for a known edge.  The risk scorer combines this with other
-signals to produce a severity label (FR-6).
+The base score is ``1.0`` for a new edge (binary heuristic, per FR-5.2) and
+``0.0`` for a known edge.  The risk scorer combines this with other signals to
+produce a severity label (FR-6).
+
+``lateral_signals`` carries zero or more additional anomaly dicts from
+:class:`~app.ml_engine.graph_model.lateral_movement.LateralMovementDetector`:
+
+* ``{\"kind\": \"graph_sensitive_port\", ...}`` — new edge to a sensitive service
+* ``{\"kind\": \"graph_lateral_path\", ...}`` — two-hop lateral movement chain
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ import traceback
 
 from app.db.neo4j_client import get_graph_client
 from app.ml_engine.graph_model.graph_diff import GraphDiffDetector
+from app.ml_engine.graph_model.lateral_movement import LateralMovementDetector
 
 logger = logging.getLogger("graph_model.infer")
 
@@ -30,12 +38,13 @@ logger = logging.getLogger("graph_model.infer")
 EPHEMERAL_PORT_MIN = 32768
 
 _detector: GraphDiffDetector | None = None
+_lateral_detector: LateralMovementDetector | None = None
 _init_failed = False
 
 
 async def _ensure_detector() -> GraphDiffDetector | None:
     """Lazily initialise the detector and load the baseline."""
-    global _detector, _init_failed
+    global _detector, _lateral_detector, _init_failed
 
     if _init_failed:
         return None
@@ -49,6 +58,7 @@ async def _ensure_detector() -> GraphDiffDetector | None:
 
         _detector = GraphDiffDetector()
         count = await _detector.load_baseline()
+        _lateral_detector = LateralMovementDetector()
         logger.info("graph model ready — baseline contains %d edges", count)
         return _detector
     except Exception:
@@ -61,8 +71,12 @@ async def score_graph_event(event) -> dict | None:
     """Score an internal event against the graph baseline.
 
     Returns:
-        ``{"kind": "ml_graph", "score": 1.0, "detail": {...}}`` if the
-        edge is anomalous (new), ``None`` if known or on error.
+        A dict with keys ``kind``, ``score``, ``detail``, and
+        ``lateral_signals`` if the edge is new (anomalous), or ``None`` if
+        the edge is already known or on error.
+
+        ``lateral_signals`` is a list (possibly empty) of additional anomaly
+        dicts from :class:`LateralMovementDetector`.
 
     Only internal (east-west) events are scored.
     """
@@ -109,10 +123,25 @@ async def score_graph_event(event) -> dict | None:
                 "graph anomaly: %s → %s:%d (baseline had %d edges)",
                 src, dst, port, result["baseline_size"],
             )
+
+            # Run lateral movement / sensitive-port heuristics on the new edge
+            lateral_signals: list[dict] = []
+            if _lateral_detector is not None:
+                ts = None
+                if hasattr(event, "timestamp") and event.timestamp is not None:
+                    try:
+                        ts = event.timestamp.timestamp()
+                    except Exception:
+                        ts = None
+                lateral_signals = _lateral_detector.record_new_edge(
+                    src, dst, port, timestamp=ts
+                )
+
             return {
                 "kind": "ml_graph",
                 "score": 1.0,
                 "detail": result,
+                "lateral_signals": lateral_signals,
             }
 
         # Known edge — still update last_seen in the graph

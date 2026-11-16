@@ -51,6 +51,9 @@ class TestRuleKnownBadIp:
         assert len(alerts) == 1
         a = alerts[0]
         assert a.mitre_technique_id == "T1071"
+        assert a.mitre_technique_name == "Application Layer Protocol"
+        assert a.mitre_tactic_id == "TA0011"
+        assert a.mitre_tactic_name == "Command and Control"
         assert a.severity == Severity.HIGH
         assert "192.0.2.10" in a.description
 
@@ -60,6 +63,9 @@ class TestRuleKnownBadIp:
         alerts = eng.evaluate(ev)
         assert len(alerts) == 1
         assert alerts[0].mitre_technique_id == "T1071"
+        assert alerts[0].mitre_technique_name == "Application Layer Protocol"
+        assert alerts[0].mitre_tactic_id == "TA0011"
+        assert alerts[0].mitre_tactic_name == "Command and Control"
 
     def test_quiet_on_benign(self) -> None:
         eng = RuleEngine()
@@ -74,6 +80,9 @@ class TestRuleKnownBadPort:
         alerts = eng.evaluate(ev)
         assert len(alerts) == 1
         assert alerts[0].mitre_technique_id == "T1043"
+        assert alerts[0].mitre_technique_name == "Commonly Used Port"
+        assert alerts[0].mitre_tactic_id == "TA0011"
+        assert alerts[0].mitre_tactic_name == "Command and Control"
         assert alerts[0].severity == Severity.MEDIUM
 
     def test_quiet_on_clean_port(self) -> None:
@@ -105,6 +114,9 @@ class TestRulePortScan:
         fired_alerts = [a for alerts in results.values() for a in alerts]
         assert fired_alerts
         assert fired_alerts[0].mitre_technique_id == "T1046"
+        assert fired_alerts[0].mitre_technique_name == "Network Service Discovery"
+        assert fired_alerts[0].mitre_tactic_id == "TA0007"
+        assert fired_alerts[0].mitre_tactic_name == "Discovery"
         assert fired_alerts[0].severity == Severity.HIGH
         assert len(fired_alerts) == 1
 
@@ -174,12 +186,15 @@ class TestRulePortScan:
 class TestRuleRestrictedProtocol:
     @pytest.fixture(autouse=True)
     def _stub_dns(self, monkeypatch) -> None:
-        """demo-db is unresolvable from the test host; stub the resolver."""
-        monkeypatch.setattr(
-            indicators,
-            "_resolve_container_ips",
-            lambda name: {"172.18.0.4"} if name == "demo-db" else set(),
-        )
+        """demo-db and demo-api are unresolvable from the test host; stub the resolver."""
+        def _fake_resolve(name: str) -> set[str]:
+            if name == "demo-db":
+                return {"172.18.0.4"}
+            if name == "demo-api":
+                return {"172.18.0.7"}
+            return set()
+
+        monkeypatch.setattr(indicators, "_resolve_container_ips", _fake_resolve)
         indicators._resolve_restricted_connections.cache_clear()
 
     def test_fires_on_restricted_port(self) -> None:
@@ -188,6 +203,9 @@ class TestRuleRestrictedProtocol:
         alerts = eng.evaluate(ev)
         assert len(alerts) == 1
         assert alerts[0].mitre_technique_id == "T1571"
+        assert alerts[0].mitre_technique_name == "Non-Standard Port"
+        assert alerts[0].mitre_tactic_id == "TA0011"
+        assert alerts[0].mitre_tactic_name == "Command and Control"
         assert alerts[0].severity == Severity.HIGH
 
     def test_fires_lateral_movement_to_restricted_db_from_unknown(self) -> None:
@@ -197,13 +215,59 @@ class TestRuleRestrictedProtocol:
         alerts = eng.evaluate(ev)
         assert len(alerts) == 1
         assert alerts[0].mitre_technique_id == "T1571"
+        assert alerts[0].mitre_technique_name == "Non-Standard Port"
+        assert alerts[0].mitre_tactic_id == "TA0011"
+        assert alerts[0].mitre_tactic_name == "Command and Control"
         assert "lateral movement" in alerts[0].description
 
     def test_allowed_source_connecting_demo_db_is_quiet(self) -> None:
         eng = RuleEngine()
-        # demo-api is the whitelisted source for demo-db:5432
+        # demo-api is the whitelisted source for demo-db:5432 (resolved dynamically to 172.18.0.7)
         ev = _event(12, "bfa91286e27b", "172.18.0.7", "172.18.0.4", 5432)
         assert eng.evaluate(ev) == []
+
+    def test_allowed_source_with_different_container_id_is_quiet(self) -> None:
+        """Dynamic resolution ensures container recreation (new container_id) is NOT falsely flagged."""
+        eng = RuleEngine()
+        # Same demo-api IP, completely new random 12-char container ID
+        ev = _event(14, "deadbeef1234", "172.18.0.7", "172.18.0.4", 5432)
+        assert eng.evaluate(ev) == []
+
+    def test_disallowed_source_different_ip_is_flagged(self) -> None:
+        """An attacker using another IP is properly flagged even if attempting demo-db:5432."""
+        eng = RuleEngine()
+        ev = _event(15, "attacker9999", "172.18.0.99", "172.18.0.4", 5432)
+        alerts = eng.evaluate(ev)
+        assert len(alerts) == 1
+        assert alerts[0].mitre_technique_id == "T1571"
+        assert "lateral movement" in alerts[0].description
+
+    def test_allowed_source_by_container_id_fallback(self, monkeypatch) -> None:
+        """If a policy rule specifies an exact container ID, it is still respected as fallback."""
+        def _custom_rules() -> list[dict]:
+            return [
+                {
+                    "dst_container": "demo-db",
+                    "dst_port": 5432,
+                    "dst_ips": {"172.18.0.4"},
+                    "allowed_sources": {"explicit_cid_123"},
+                    "allowed_ips": set(),
+                    "allowed_ids": {"explicit_cid_123"},
+                    "description": "Test explicit container ID",
+                }
+            ]
+
+        monkeypatch.setattr(indicators, "get_restricted_connections", _custom_rules)
+        eng = RuleEngine()
+        # Allowed because container_id matches allowed_ids
+        ev_allowed = _event(16, "explicit_cid_123", "172.18.0.50", "172.18.0.4", 5432)
+        assert eng.evaluate(ev_allowed) == []
+
+        # Disallowed because neither IP nor container_id matches
+        ev_disallowed = _event(17, "other_cid_456", "172.18.0.50", "172.18.0.4", 5432)
+        alerts = eng.evaluate(ev_disallowed)
+        assert len(alerts) == 1
+        assert "lateral movement" in alerts[0].description
 
     def test_backend_to_metadata_postgres_is_not_lateral_movement(self) -> None:
         """Backend talking to its own metadata postgres (172.18.0.2) is not the

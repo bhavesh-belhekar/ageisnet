@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS alerts (
     detection_type     TEXT NOT NULL CHECK (detection_type IN ('rule', 'ml')),
     severity           TEXT NOT NULL CHECK (severity IN ('low', 'medium', 'high')),
     mitre_technique_id TEXT,
+    mitre_technique_name TEXT,
+    mitre_tactic_id    TEXT,
+    mitre_tactic_name  TEXT,
     description        TEXT NOT NULL,
     shap_explanation   JSONB,
     acknowledged       BOOLEAN NOT NULL DEFAULT FALSE
