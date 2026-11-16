@@ -5,6 +5,10 @@ test the training, inference, and explanation paths. The CSVs are generated
 deterministically by `scripts/generate_synthetic_flow_data.py`; they do not
 represent captured network traffic.
 
+See [SYNTHETIC_MODEL_PERFORMANCE.md](SYNTHETIC_MODEL_PERFORMANCE.md) for full
+metric definitions, confusion matrices, threshold details, SHAP values, and
+reproduction steps.
+
 ## Data and fit
 
 - Training: 1,000 synthetic normal feature windows.
